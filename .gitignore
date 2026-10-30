@@ -1,0 +1,32 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# Runtime data, environments, captures, reports and generated geometry.
+runtime/
+assets/
+models/
+captures/
+outputs/
+logs/
+*.pkl
+*.onnx
+*.pth
+*.pt
+*.npz
+*.npy
+*.obj
+*.ply
+*.png
+*.jpg
+*.jpeg
+
+# Small shape prompts are source data required by the vendored TUFA detector.
+!third_party/tufa/Prompt/shape_*.npz
+
+# Local editor and OS metadata.
+.vscode/
+.idea/
+Thumbs.db
+Desktop.ini

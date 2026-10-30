@@ -1,0 +1,30 @@
+{
+  "schema": "head_rgbd.defaults.v1",
+  "reconstruction": {
+    "mode": "guarded",
+    "device": "cuda",
+    "steps": 240,
+    "points_per_frame": 1200,
+    "keyframes_per_segment": 3,
+    "expression_components": 30,
+    "front_only": false
+  },
+  "capture": {
+    "frames_per_view": 5,
+    "interval_s": 0.12,
+    "warmup_s": 0.8,
+    "countdown_s": 2,
+    "views": [
+      "closed:front",
+      "closed:left",
+      "closed:right",
+      "open:front"
+    ],
+    "max_adjacent_gap_s": 0.2
+  },
+  "evidence": {
+    "normal_refinement_bound_m": 0.003,
+    "minimum_signed_area_ratio": 0.05,
+    "temporal_gap_s": 0.2
+  }
+}
