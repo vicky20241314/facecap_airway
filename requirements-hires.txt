@@ -1,0 +1,4 @@
+-r requirements.txt
+# Only required by the explicit high-resolution research entry.
+osqp==1.0.5
+joblib==1.5.2

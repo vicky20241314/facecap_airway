@@ -695,3 +695,67 @@ Set-Location -LiteralPath 'D:\proiect\withB'
 本次版本化与仓库关联不删除旧数据、不合并 main、不创建/移动标签。
 原始采集、仍在使用的环境/模型/缓存、源码/worktree 以及必要研究归档继续保留在
 各自独立位置，不迁入程序目录；未经明确批准的路径不删除。
+
+## 13. 深度高分辨率研究入口（本独立分支）
+
+项目版本保持 **0.1.0**，默认 `run/capture-run` 仍为 C guarded。
+本分支另增 `depth-hires --research-only`，实现新的正面锚、物理尺度正则、
+显式共享几何约束及接受真实深度约束的 20018 顶点/39904 面密集输出。
+全视角身份更新用单独 `joint-research` 候选表示，不悄悄取消正面保护。
+
+原 0.1.0 的 `closed_refined_m.obj` 是在原 5023 个顶点上沿法向移动后的网格，
+没有网格加密，所以名字中的 refined 不意味着顶点增加。法向位移还可能吸收
+深度噪声、剩余姿态和表情误差；当前正面锚中的这些位移会被 guarded 保留下来。
+单纯改变显示法线、增加拟合次数或只切分原三角形，不能解决这些几何问题。
+新入口先从原粗几何重建正面锚，用表面积权重、跨帧一致性及物理尺度梯度/弯曲
+项求共享位移，并在每轮刷新三角形对应。几何约束直接参与求解，再统一检查全部
+实际姿态，避免局部事后折半造成突变。密集层随后独立查询深度和观测支持。
+
+方法、原论文/作者实现核对、许可和完整复现命令见
+[D_METHOD.md](head_rgbd/D_METHOD.md)，实际结果见
+[D_RESULTS.md](head_rgbd/D_RESULTS.md)。环境新增依赖见 `requirements-hires.txt`。
+本研究使用独立 worktree 和 `withB-depth-hires-runtime-20261031`；所有研究命令
+显式指定 `-Runtime`，避免使用原项目运行目录。未通过综合门槛的结果仍是研究候选。
+
+在本分支和独立运行目录中，从原始采集副本完整运行：
+
+```powershell
+pwsh.exe -NoProfile -ExecutionPolicy Bypass -File 'D:\proiect\withB-depth-hires-20261031\headrgbd.ps1' -Runtime 'D:\proiect\withB-depth-hires-runtime-20261031' depth-hires --capture 'D:\proiect\withB-depth-hires-runtime-20261031\captures\live' --baseline 'D:\proiect\withB-depth-hires-runtime-20261031\inputs\v010' --output 'D:\proiect\withB-depth-hires-runtime-20261031\outputs\cold-reproduction-NEW' --research-only --include-joint --solver qp --dense-mode hierarchical --device cuda
+```
+
+输出目录必须是新目录。该命令顺序执行准备、原 C 初始化、重新求解正面锚、
+同拓扑身份场、密集身份场、支持度与标点导出、可选全视角候选和同数据比较。
+`--include-joint` 会额外运行独立的全视角粗身份候选，不改变 guarded 的保护范围。
+该实现以 CPU 稀疏约束求解为主，包含所有实际姿态的几何检查，不能按实时系统使用。
+
+此命令明确选择层级密集研究模式：精确插值已稳定的控制表面，只在新增顶点
+拟合共享小残差，控制顶点保持不动；额外残差 ≤0.5 mm，且所有姿态相对原始
+FLAME 插值基面的**总位移仍 ≤3 mm**。旧 `absolute` 密集模式保留作研究消融，
+其波纹问题与实验03数值归档见 `head_rgbd/D_RESULTS_03.md`，不能作为默认改进。
+新模式的 `dense_solver_scalar_m` 是残差，实际总位移须读取
+`dense_total_displacement_m`，不能把两个阶段的预算相加。
+
+| 文件（`guarded` / `joint` 子目录） | 解释 |
+|---|---|
+| `closed_coarse_m.obj` / `open_coarse_m.obj` | 各候选自己的 FLAME 动画控制网格，5023 顶点、9976 面 |
+| `closed_regularized_m.obj` / `open_regularized_m.obj` | 在控制拓扑上重新由真实深度求解的平顺身份场 |
+| `closed_dense_m.obj` / `open_dense_m.obj` | 实际深度约束的密集表面，20018 顶点、39904 面 |
+| `*_dense_interpolation_m.obj` | 只插值同拓扑位移的消融，不能当作恢复细节的证据 |
+| `reference_geometry.json` | 闭口/张口真实参考帧、每个阶段的三角面重心标点、米制坐标和观测有效位 |
+| `mapping.npz` | 密集顶点的控制顶点/边插值关系与子面父面映射 |
+| `support_regularized.npz` / `support_dense.npz` | 在各自最终拓扑重新计算的逐帧可见观测位、计数、支持标签和启发式置信度 |
+| `*_support_m.ply` | 灰：未观测先验/补全；黄：单帧支持；蓝：至少两帧支持。重复短序列不等于独立真值 |
+| `parameters.npz` / `report.json` | 全序列共享场、逐帧状态、保护掩码、角色/排除记录、迭代安全检查与计时 |
+
+`comparison/comparison.json` 汇总共同覆盖下的局部残差、固定物理尺度平顺性、
+同拓扑相交风险、标点和保护检查；`geometry_flat.png` 和 `geometry_smooth.png`
+采用相同光照和尺度，无纹理。90° 图只用于几何检查，不代表采集到了完全侧脸。
+`run_report.json` 的流程退出成功与 `geometry_effect_acceptance` 分开，
+`independent_accuracy` 在缺少独立真值时始终为 `unverified`。
+
+本轮实际结果：33 项测试和指定真实数据流程通过，guarded 同拓扑/密集结果的
+固定物理尺度平顺性改善，10 个正面帧 P95 均未相对 0.1.0 回归。但斜侧与覆盖
+仍有失败项，密集额头/面颊仍可见控制表面的折面；纯几何插值重算法线也会出现
+类似显示变化。完整视觉与综合几何验收**未通过**，真实高频细节和独立精度
+**未验证**。当前没有实现 C1/C2 连续曲面，不能把更多顶点等同于彻底平顺。
+实际数值、图像对照和限制集中在 `head_rgbd/D_RESULTS.md`。

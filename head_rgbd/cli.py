@@ -806,6 +806,9 @@ def build_parser() -> tuple[argparse.ArgumentParser, dict[str, Any]]:
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
+    from head_rgbd.hires_pipeline import add_parser as add_hires_parser
+    add_hires_parser(sub, defaults)
+
     status = sub.add_parser("status", help="verify runtime and report environment")
     status.add_argument("--output", type=Path)
     status.set_defaults(func=command_status)

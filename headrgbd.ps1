@@ -10,10 +10,20 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+$env:PYTHONIOENCODING = 'utf-8'
+$env:PYTHONUTF8 = '1'
 if ($Version) {
     $Command = '--version'
 }
-elseif ($Help -or [string]::IsNullOrWhiteSpace($Command)) {
+elseif ($Help) {
+    if ([string]::IsNullOrWhiteSpace($Command)) {
+        $Command = '--help'
+    }
+    else {
+        $Arguments = @($Arguments) + @('--help')
+    }
+}
+elseif ([string]::IsNullOrWhiteSpace($Command)) {
     $Command = '--help'
 }
 $Python = Join-Path $Runtime 'env\python.exe'
