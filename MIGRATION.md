@@ -11,7 +11,9 @@
 | 目标分支 | `codex/withb-rgbd-head-20261030` |
 | 独立运行目录 | `D:\proiect\withB-runtime` |
 | 本机环境 | Windows / PowerShell / Python 3.10.22 |
-| 目标 remote | 未配置；本次不推送、不合并 main、不改版本或标签 |
+| 项目版本 | `0.1.0`，以仓库根目录 `VERSION` 为唯一版本源 |
+| 目标 remote | `origin` = `https://github.com/vicky20241314/facecap_airway.git` |
+| 发布边界 | 推送到独立 `codex/` 分支；不合并 main、不移动或创建标签 |
 
 迁移前已读取来源 `AGENTS.md`、`research/head_rgbd/C_METHOD.md`、
 `C_RESULTS.md` 和 `experiment-c-20261030.json`，并确认来源 worktree 干净。
@@ -27,6 +29,7 @@
   统一 CLI 和来源方法/结果文档。
 - `third_party/flame/`：FLAME 代码及 MIT 许可证，不含模型资产。
 - `third_party/tufa/`：TUFA 代码及 GPL-2.0 许可证，不含权重。
+- `VERSION`：项目版本 `0.1.0` 的唯一来源。
 - `config/assets.json`、`config/defaults.json`：资产 SHA256 与默认重建参数。
 - `tests/test_contracts.py`：资产、时间、身份、口部空值、失败审计和采集契约测试。
 - `headrgbd.ps1`、`requirements.txt`、`.gitignore`：独立启动和环境入口。
@@ -70,7 +73,7 @@
 | `compare_all_methods` | 0 | 71.927 |
 | 全流水线 | 0 | 388.890 |
 
-guarded C 的拟合耗时 163.275 秒，PyTorch allocator 峰值 allocated/reserved
+guarded C 内部总耗时 163.275 秒（纯拟合字段 `fitting_s` 为 81.134 秒），PyTorch allocator 峰值 allocated/reserved
 为 65.767/88.000 MiB。各 GPU 阶段串行运行，没有终止其他 agent 进程；reserved
 只是本进程 allocator 峰值，不是整卡总显存。
 
@@ -153,9 +156,9 @@ run report 退出语义为 2。结论是相机连接和失败审计已验证，�
 
 | 项目 | 文件数 | 说明 |
 |---|---:|---|
-| `MIGRATION_MANIFEST.txt` 所列文件 | 70 | 可交付源码；逐文件字节和 SHA256 见清单 |
+| `MIGRATION_MANIFEST.txt` 所列文件 | 71 | 可交付源码；逐文件字节和 SHA256 见清单 |
 | `MIGRATION_MANIFEST.txt` | 1 | 固定格式的文件级 SHA256 清单 |
-| `D:\proiect\withB`（含本地缓存，不含 `.git`） | 126 | 其中 55 个本地缓存文件不属于交付清单 |
+| `D:\proiect\withB`（含本地缓存，不含 `.git`） | 127 | 其中 55 个本地缓存文件不属于交付清单 |
 
 提交后的精确整树、`.git`、缓存、清单和运行目录占用记录在独立审计 JSON
 `D:\proiect\withB-runtime\logs\withb_migration_validation_final_20261031.json`
@@ -241,3 +244,30 @@ run report 退出语义为 2。结论是相机连接和失败审计已验证，�
 - “独立真实精度验收通过”：未验证。
 
 文件级清单与 SHA256 见 `MIGRATION_MANIFEST.txt`。
+
+## 0.1.0 版本化与仓库关联补充（2026-10-31）
+
+上文运行结果和磁盘测量保留迁移时的历史口径；以下是本次现场检查的变化：
+
+- 已将项目版本定义为 `0.1.0`，唯一版本源为 `VERSION`；CLI、Python 包、
+  新 status/run report 读取同一版本。不修改原项目版本或标签。
+- README 扩展为完整中文使用和算法文档，区分准备、身份/表情、三角形对应、
+  guarded 保护、细化、防翻转、颈部、支持度和真实精度边界。
+- 本次发现 `outputs\regression-20261031-final` 已不在原位置；其结果仍由
+  `logs\withb_migration_validation_final_20261031.json` 保存的历史审计支持。
+  不能把历史路径写成当前可现场复验的输出，也没有在本次删除该目录。
+- 新真人采集 `captures\20261031_091957_065754_head` 有人脸和有效深度。
+  对应原运行 prepare、C-front、guarded 均退出 0；验证输出因未创建
+  `validation` 父目录而失败。0.1.0 已修复该入口目录创建，未放宽几何保护。
+- 对上述现存产物的补充验证位于
+  `D:\proiect\withB-runtime\outputs\v010-live-artifact-verification-20261031`，
+  验证及参考几何子阶段均退出 0；有限、米制、标点坐标/阶段、支持度、
+  16 条段内时间边、防翻转与 10 个正面锚一致性检查通过。
+- 原真人失败报告保留原样；本次未重采、未重跑整条 `capture-run`。
+  分段证据已齐备，不能写成一键全链路重新运行通过，更不代表几何效果通过。
+- 本次 compileall 通过，20 项测试通过，PowerShell 版本/帮助入口通过，
+  status 和 7 项资产校验通过。修复了 `-File ... --version` 未透传的问题。
+- 迁移清单重新生成并校验；清单记录当前工作树的文件字节，跨系统 checkout
+  的换行转换可能改变字节哈希，比较时须采用相同换行口径。
+- 按本次授权将独立分支关联并推送至 `facecap_airway`；不合并 main、不创建标签。
+- 本次删除 0 文件、释放 0 字节；未对旧研究运行目录执行任何清理。

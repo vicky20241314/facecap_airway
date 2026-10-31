@@ -14,6 +14,7 @@ from typing import Any, Iterable
 
 import numpy as np
 
+from head_rgbd import __version__
 from head_rgbd.audit import sha
 from head_rgbd.paths import create_exclusive_dir, resolve_runtime_dir
 
@@ -214,6 +215,7 @@ class StageRunner:
         self.environment = collect_environment(self.runtime)
         self.report = {
             "schema": "head_rgbd.run.v1",
+            "project_version": __version__,
             "purpose": purpose,
             "status": "running",
             "started_at": self.started_at,

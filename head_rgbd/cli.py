@@ -9,6 +9,7 @@ from pathlib import Path
 import sys
 from typing import Any
 
+from head_rgbd import __version__
 from head_rgbd.audit import sha
 from head_rgbd.paths import (
     PROJECT_ROOT,
@@ -197,6 +198,7 @@ def _run_verification(
     sequence: Path,
     destination: Path,
 ) -> dict[str, str]:
+    destination.mkdir(parents=True, exist_ok=True)
     verification = destination / "verification.json"
     code = runner.run(
         "verify_geometry_contracts",
@@ -296,6 +298,7 @@ def command_status(args: argparse.Namespace) -> int:
     assets = _asset_gate(paths.runtime)
     result = {
         "schema": "head_rgbd.status.v1",
+        "project_version": __version__,
         "created_at": datetime.now().astimezone().isoformat(),
         "runtime_layout": {name: str(path) for name, path in layout.items()},
         "assets": assets,
@@ -790,6 +793,11 @@ def build_parser() -> tuple[argparse.ArgumentParser, dict[str, Any]]:
     parser = argparse.ArgumentParser(
         prog="headrgbd",
         description="Standalone Gemini RGB-D head reconstruction prototype",
+    )
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"headrgbd {__version__}",
     )
     parser.add_argument(
         "--runtime",

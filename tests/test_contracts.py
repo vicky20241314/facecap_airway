@@ -2,16 +2,21 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import redirect_stdout
 import hashlib
+import io
 import json
 import os
 from pathlib import Path
+import shutil
+import subprocess
 import tempfile
 import unittest
 from unittest import mock
 
 import numpy as np
 
+import head_rgbd
 from head_rgbd import cli
 from head_rgbd.capture_session import parse_view_specs
 from head_rgbd.contracts import temporal_edge_allowed
@@ -44,7 +49,61 @@ def _write_manifest(root: Path, expected: str) -> Path:
     return manifest
 
 
+class VersionContract(unittest.TestCase):
+    @unittest.skipUnless(shutil.which("pwsh.exe"), "PowerShell launcher test requires pwsh.exe")
+    def test_powershell_file_launcher_reports_the_version(self):
+        project = Path(__file__).resolve().parents[1]
+        runtime = Path(os.environ.get("HEADRGBD_RUNTIME_DIR", project.parent / "withB-runtime"))
+        if not (runtime / "env" / "python.exe").is_file():
+            self.skipTest("standalone runtime environment is not installed")
+        completed = subprocess.run(
+            [
+                "pwsh.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
+                str(project / "headrgbd.ps1"), "-Runtime", str(runtime), "--version",
+            ],
+            capture_output=True, text=True, check=False, timeout=30,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(completed.stdout.strip(), f"headrgbd {head_rgbd.__version__}")
+
+    def test_version_file_package_and_cli_are_one_contract(self):
+        version_path = Path(__file__).resolve().parents[1] / "VERSION"
+        self.assertEqual(version_path.read_text(encoding="utf-8").strip(), "0.1.0")
+        self.assertEqual(head_rgbd.__version__, "0.1.0")
+
+        parser, _ = cli.build_parser()
+        output = io.StringIO()
+        with redirect_stdout(output), self.assertRaises(SystemExit) as raised:
+            parser.parse_args(["--version"])
+        self.assertEqual(raised.exception.code, 0)
+        self.assertEqual(output.getvalue().strip(), "headrgbd 0.1.0")
+
+
 class AssetAndOutputContracts(unittest.TestCase):
+    def test_pipeline_verification_can_write_to_new_nested_directory(self):
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name)
+            destination = root / "new-run" / "validation"
+            runner = mock.Mock()
+            runner.runtime = root / "runtime"
+
+            def write_stage_output(stage, module, arguments):
+                output = Path(arguments[arguments.index("--output") + 1])
+                # Match the real stage's exclusive writer: it needs its parent.
+                with output.open("x", encoding="utf-8") as stream:
+                    json.dump({"status": "passed"}, stream)
+                return 0
+
+            runner.run.side_effect = write_stage_output
+            outputs = cli._run_verification(
+                runner,
+                fit=root / "fit",
+                sequence=root / "sequence.json",
+                destination=destination,
+            )
+            self.assertEqual(runner.run.call_count, 2)
+            self.assertTrue(all(Path(path).is_file() for path in outputs.values()))
+
     def test_asset_verification_detects_missing_and_tampered_files(self):
         with tempfile.TemporaryDirectory() as name:
             root = Path(name)
