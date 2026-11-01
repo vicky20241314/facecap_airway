@@ -1,0 +1,47 @@
+{
+  "schema": "head_rgbd.assets.v1",
+  "assets": [
+    {
+      "name": "flame_model",
+      "path": "flame/flame2023.pkl",
+      "sha256": "8fb1af0db1abb51053ead8fd1f2624a63d01c9602f4a4fb4ea23bd2c82017fa0",
+      "purpose": "FLAME 2023 shared identity, expression and jaw model"
+    },
+    {
+      "name": "flame_static_embedding",
+      "path": "flame/flame_static_embedding.pkl",
+      "sha256": "2881bdad8e61e87aad83a3df2e04655c534694089f68ca7144e7350da9e8ad62",
+      "purpose": "FLAME static landmark embedding"
+    },
+    {
+      "name": "flame_dynamic_embedding",
+      "path": "flame/flame_dynamic_embedding.npy",
+      "sha256": "fd046a4740f5e6837e65622d0e050273bb71bbcb1ad6ab322474013a2a23de37",
+      "purpose": "FLAME dynamic contour landmark embedding"
+    },
+    {
+      "name": "yunet_detector",
+      "path": "models/yunet/face_detection_yunet_2023mar.onnx",
+      "sha256": "8f2383e4dd3cfbb4553ea8718107fc0423210dc964f9f4280604804ed2552fa4",
+      "purpose": "per-frame face bounding-box detection"
+    },
+    {
+      "name": "uniface_parser",
+      "path": "uniface/parsing_resnet34.onnx",
+      "sha256": "5b805bba7b5660ab7070b5a381dcf75e5b3e04199f1e9387232a77a00095102e",
+      "purpose": "local face and neck semantic parsing"
+    },
+    {
+      "name": "tufa_weight",
+      "path": "tufa/Face_prompt_base.pth",
+      "sha256": "3fe7071bef814af320c6e6ec7d724b4b1bb253677500e1a48a5e2a66aaf10899",
+      "purpose": "TUFA 68-point landmark network"
+    },
+    {
+      "name": "tufa_prompt",
+      "path": "tufa/Prompt/shape_68.npz",
+      "sha256": "c42f58fef5eff4ae44aa1784d7d2cc01827757f4f372eeec4b49862fe21ec53f",
+      "purpose": "TUFA 68-point prompt offset"
+    }
+  ]
+}

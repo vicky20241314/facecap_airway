@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# Runtime: environment, models, captures, caches and generated geometry.
+runtime/env/
+runtime/models/
+runtime/assets/
+runtime/cache/
+runtime/captures/
+runtime/outputs/
+runtime/logs/
+runtime/_validation/
+
+# Generated geometry, point clouds and model weights
+*.obj
+*.ply
+*.stl
+*.pkl
+*.onnx
+*.pth
+*.pt
+*.npz
+*.npy
+
+# TUFA ships a small shape prompt that is source data, not a trained weight.
+!third_party/tufa/Prompt/shape_*.npz
+
+# Local editor and OS metadata
+.vscode/
+.idea/
+Thumbs.db
+Desktop.ini

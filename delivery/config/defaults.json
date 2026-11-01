@@ -1,0 +1,43 @@
+{
+  "schema": "head_rgbd.defaults.v2",
+  "algorithm": {
+    "name": "facecap-inspired-v2-strict",
+    "fixed_ray_policy": "strict-coverage",
+    "source": "candidate_frozen chain verified 2026-10-31 (source commit 9ef3837)",
+    "note": "single default; no B/C/free/guarded/accounted research switch is exposed"
+  },
+  "reconstruction": {
+    "mode": "guarded",
+    "device": "cuda",
+    "steps": 240,
+    "points_per_frame": 1200,
+    "keyframes_per_segment": 3,
+    "expression_components": 30,
+    "dense_points": 5000,
+    "front_only": false
+  },
+  "export": {
+    "mesh_stage": "dense",
+    "mesh_state": "closed",
+    "filename": "head_m.obj",
+    "unit": "m"
+  },
+  "capture": {
+    "frames_per_view": 5,
+    "interval_s": 0.12,
+    "warmup_s": 0.8,
+    "countdown_s": 2,
+    "views": [
+      "closed:front",
+      "closed:left",
+      "closed:right",
+      "open:front"
+    ],
+    "max_adjacent_gap_s": 0.2
+  },
+  "evidence": {
+    "normal_refinement_bound_m": 0.003,
+    "minimum_signed_area_ratio": 0.05,
+    "temporal_gap_s": 0.2
+  }
+}

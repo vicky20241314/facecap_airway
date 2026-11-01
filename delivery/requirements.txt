@@ -1,0 +1,20 @@
+# Python 3.10 (CPython, Windows x64). The delivered runtime/env already contains
+# these versions; this file documents how to rebuild an equivalent environment.
+numpy==1.26.4
+scipy==1.11.4
+torch==2.0.1
+torchvision==0.15.2
+opencv-python==4.8.1.78
+trimesh==4.4.9
+rtree==1.4.1
+smplx==0.1.28
+chumpy==0.70
+timm==0.9.16
+batch-face==1.5.4
+onnxruntime==1.18.1
+uniface==3.5.2
+pyorbbecsdk==2.2.8
+yacs==0.1.8
+osqp==1.0.5
+joblib==1.5.2
+pytest==9.1.1
