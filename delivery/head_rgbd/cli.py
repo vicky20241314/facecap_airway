@@ -36,6 +36,15 @@ from head_rgbd.reporting import timestamp_id, write_json
 DEFAULT_VIEWS = ["closed:front", "closed:left", "closed:right", "open:front"]
 
 
+def _mesh_paths(delivery: Path) -> dict[str, str]:
+    """Final meshes of one delivery folder, keyed by expression state."""
+    defaults = load_defaults()
+    return {
+        state: str(delivery / name)
+        for state, name in defaults["export"]["filenames"].items()
+    }
+
+
 def _add_capture_options(parser: argparse.ArgumentParser, defaults: dict) -> None:
     capture = defaults["capture"]
     parser.add_argument("--session-name", default="head", help="label stored in the capture folder name")
@@ -124,7 +133,7 @@ def command_run(args: argparse.Namespace) -> int:
         purpose="live_capture_to_offline_reconstruction",
     )
     _attach_capture(output / "run_report.json", capture, "passed")
-    print(json.dumps({"mesh": str(delivery / "head_m.obj"), "manifest": str(delivery / "manifest.json")}, indent=2))
+    print(json.dumps({"meshes": _mesh_paths(delivery), "manifest": str(delivery / "manifest.json")}, indent=2))
     return code
 
 
@@ -151,7 +160,7 @@ def command_reconstruct(args: argparse.Namespace) -> int:
     )
     if recorded:
         _attach_capture(output / "run_report.json", capture_dir, "passed")
-    print(json.dumps({"mesh": str(delivery / "head_m.obj"), "manifest": str(delivery / "manifest.json")}, indent=2))
+    print(json.dumps({"meshes": _mesh_paths(delivery), "manifest": str(delivery / "manifest.json")}, indent=2))
     return code
 
 
@@ -179,9 +188,9 @@ def command_export(args: argparse.Namespace) -> int:
     print(
         json.dumps(
             {
-                "mesh": str(run / "delivery" / "head_m.obj"),
-                "vertices": manifest["mesh"]["vertices"],
-                "faces": manifest["mesh"]["faces"],
+                "meshes": _mesh_paths(run / "delivery"),
+                "vertices": {state: item["vertices"] for state, item in manifest["mesh"]["states"].items()},
+                "faces": {state: item["faces"] for state, item in manifest["mesh"]["states"].items()},
                 "status": manifest["status"],
             },
             indent=2,
@@ -246,7 +255,7 @@ def build_parser() -> argparse.ArgumentParser:
         prog="headrgbd",
         description=(
             "Orbbec Gemini 215 RGB-D head reconstruction: guided capture, offline "
-            "reconstruction and one metric mesh (algorithm: " + ALGORITHM + ")."
+            "reconstruction and two metric meshes, closed and open (algorithm: " + ALGORITHM + ")."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
@@ -261,7 +270,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--runtime", type=Path, help="runtime root (default: <project>/runtime)")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    run = sub.add_parser("run", help="capture a guided session, reconstruct and export head_m.obj")
+    run = sub.add_parser(
+        "run",
+        help="capture a guided session, reconstruct and export closed + open meshes",
+    )
     _add_capture_options(run, defaults)
     _add_fit_options(run, defaults)
     run.add_argument("--output", type=Path, help="run directory (default: runtime/outputs/<capture>_reconstruction)")
@@ -289,7 +301,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     export = sub.add_parser(
         "export",
-        help="re-export head_m.obj from a completed run (no refitting)",
+        help="re-export closed + open meshes from a completed run (no refitting)",
     )
     export.add_argument("--run", type=Path, required=True, help="run directory holding reconstruction/dense")
     export.set_defaults(func=command_export)

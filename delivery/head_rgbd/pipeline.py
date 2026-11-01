@@ -307,7 +307,14 @@ def export_delivery(
     runner: StageRunner,
     defaults: dict[str, Any],
 ) -> dict[str, Any]:
-    """Write exactly one final mesh, one manifest and the required sidecars."""
+    """Write one closed and one open final mesh, one manifest and the sidecars.
+
+    Exactly one mesh per expression state: ``head_closed_m.obj`` and
+    ``head_open_m.obj``. Both come from the same dense stage, the same shared
+    identity and the same topology; only the per-frame pose/expression/jaw of the
+    reference frame differs. No coarse, anchor, smooth-base or comparison mesh is
+    exported, and no debug switch exists in the user flow.
+    """
     from head_rgbd import __version__
     import shutil
 
@@ -317,28 +324,42 @@ def export_delivery(
     sequence_info = inspect_sequence(sequence)
 
     stage = defaults["export"]["mesh_stage"]
-    state = defaults["export"]["mesh_state"]
-    reference = references["references"][state]
-    if stage not in reference["stages"]:
-        raise ValueError(f"reference stage {stage!r} missing from {fit}")
-    source_mesh = fit / reference["stages"][stage]["mesh"]
-    final_mesh = output / "head_m.obj"
-    if final_mesh.exists():
-        raise FileExistsError(f"refusing to overwrite {final_mesh}")
-    shutil.copy2(source_mesh, final_mesh)
-    geometry = mesh_checks(final_mesh)
+    states = list(defaults["export"]["mesh_states"])
+    if states != ["closed", "open"]:
+        raise ValueError("delivery exports exactly the closed and open reference states")
+    filenames = dict(defaults["export"]["filenames"])
+    geometries: dict[str, dict[str, Any]] = {}
+    exports: dict[str, dict[str, Any]] = {}
+    for state in states:
+        reference = references["references"][state]
+        if stage not in reference.get("stages", {}):
+            raise ValueError(f"reference stage {stage!r} missing from {fit} for state {state!r}")
+        if not reference["frame_id"]:
+            raise ValueError(f"state {state!r} has no real reference frame; nothing is invented")
+        source_mesh = fit / reference["stages"][stage]["mesh"]
+        final_mesh = output / filenames[state]
+        if final_mesh.exists():
+            raise FileExistsError(f"refusing to overwrite {final_mesh}")
+        shutil.copy2(source_mesh, final_mesh)
+        geometries[state] = mesh_checks(final_mesh)
+        exports[state] = {"reference": reference, "mesh": final_mesh, "geometry": geometries[state]}
+    vertices = {state: item["geometry"]["vertices"] for state, item in exports.items()}
+    if len(set(vertices.values())) != 1:
+        raise ValueError(f"closed and open meshes must share one dense topology: {vertices}")
 
     with np.load(fit / "support_dense.npz", allow_pickle=False) as stored:
         support = {key: stored[key] for key in stored.files}
     label = support["region_label"]
-    if len(label) != geometry["vertices"]:
+    vertex_count = geometries[states[0]]["vertices"]
+    if len(label) != vertex_count:
         raise ValueError("support labels do not match the exported dense topology")
     counts = np.bincount(label, minlength=3).tolist()
     evidence = {
         "schema": "head_rgbd.delivery.support.v1",
         "labels": SUPPORT_LABELS,
         "counts": counts,
-        "vertex_label": "np.int8 per vertex, same order as head_m.obj",
+        "vertex_label": "np.int8 per vertex, same order as both exported meshes (shared topology)",
+        "applies_to": [filenames[state] for state in states],
         "confidence": support["confidence"].tolist(),
         "confidence_is_calibrated": False,
         "observed_frames": support["observed_frames"].tolist(),
@@ -348,44 +369,81 @@ def export_delivery(
             "heuristic real-observation support; model prior and interpolation are labelled, "
             "never counted as new real observations"
         ),
+        "support_is_shared": (
+            "support is accumulated over all agreed identity frames; it is not a per-state rescore, "
+            "so sections observed only while open or only while closed are not separable here"
+        ),
     }
     write_json_exclusive(output / "support.json", evidence)
 
     landmark_payload = {
-        "schema": "head_rgbd.delivery.reference_landmarks.v1",
-        "state": state,
-        "frame_id": reference["frame_id"],
-        "source_frame": reference.get("source_frame"),
-        "timestamp_s": reference.get("timestamp_s"),
-        "coordinate_system": reference["coordinate_system"],
-        "mesh_unit": reference["mesh_unit"],
-        "mesh": final_mesh.name,
+        "schema": "head_rgbd.delivery.reference_landmarks.v2",
+        "states": {},
         "landmark_indices": "FLAME dynamic contour + static 68, zero based",
-        "landmark_count": len(reference["stages"][stage]["landmarks_m"]),
-        "landmark_triangle_indices": reference["stages"][stage]["landmark_triangle_indices"],
-        "landmark_barycentric": reference["stages"][stage]["landmark_barycentric"],
-        "landmarks_m": reference["stages"][stage]["landmarks_m"],
-        "observed_landmarks_m": reference["observed_landmarks_m"],
-        "observed_valid": reference["observed_valid"],
-        "observed_inner_lip_gap_mm": reference["observed_inner_lip_gap_mm"],
-        "model_inner_lip_gap_mm": reference["stages"][stage]["inner_lip_gap_mm"],
         "observation_is_manual_truth": False,
-        "animated_model_to_reference_camera_4x4": reference["animated_model_to_reference_camera_4x4"],
-        "reference_camera_to_animated_model_4x4": reference["reference_camera_to_animated_model_4x4"],
         "transform_translation_unit": "m",
-        "transform_scope": reference["transform_scope"],
+        "note": (
+            "each state carries its own reference frame and rigid transform; the two transforms are "
+            "not comparable, there is no cross-state registration here"
+        ),
     }
+    for state in states:
+        reference = exports[state]["reference"]
+        stage_item = reference["stages"][stage]
+        landmark_payload["states"][state] = {
+            "frame_id": reference["frame_id"],
+            "source_frame": reference.get("source_frame"),
+            "timestamp_s": reference.get("timestamp_s"),
+            "coordinate_system": reference["coordinate_system"],
+            "mesh_unit": reference["mesh_unit"],
+            "mesh": exports[state]["mesh"].name,
+            "landmark_count": len(stage_item["landmarks_m"]),
+            "landmark_triangle_indices": stage_item["landmark_triangle_indices"],
+            "landmark_barycentric": stage_item["landmark_barycentric"],
+            "landmarks_m": stage_item["landmarks_m"],
+            "observed_landmarks_m": reference["observed_landmarks_m"],
+            "observed_valid": reference["observed_valid"],
+            "observed_inner_lip_gap_mm": reference["observed_inner_lip_gap_mm"],
+            "model_inner_lip_gap_mm": stage_item["inner_lip_gap_mm"],
+            "animated_model_to_reference_camera_4x4": reference["animated_model_to_reference_camera_4x4"],
+            "reference_camera_to_animated_model_4x4": reference["reference_camera_to_animated_model_4x4"],
+            "transform_scope": reference["transform_scope"],
+        }
     write_json_exclusive(output / "reference_landmarks.json", landmark_payload)
 
     neck = fit_report.get("neck", [])
     defaults_config = defaults
     warnings = _quality_warnings(fit_report, sequence_info, support)
+    warnings += _state_warnings(exports, stage)
     frames = [
         {key: row.get(key) for key in ("id", "segment", "timestamp_s", "view", "state", "role", "degraded")}
         for row in fit_report.get("frames", [])
     ]
+    mesh_payload = {
+        "unit": "m",
+        "meters_per_unit": MESH_METERS_PER_UNIT,
+        "stage": stage,
+        "topology_shared": True,
+        "mesh_files": [filenames[state] for state in states],
+        "states": {},
+    }
+    for state in states:
+        geometry = exports[state]["geometry"]
+        reference = exports[state]["reference"]
+        stage_item = reference["stages"][stage]
+        mesh_payload["states"][state] = {
+            "path": filenames[state],
+            "reference_frame": reference["frame_id"],
+            "coordinate_system": reference["coordinate_system"],
+            "vertices": geometry["vertices"],
+            "faces": geometry["faces"],
+            "extents_m": geometry["extents_m"],
+            "dense": geometry["vertices"] == fit_report["dense_topology"]["vertices"],
+            "model_inner_lip_gap_mm": stage_item["inner_lip_gap_mm"],
+            "observed_inner_lip_gap_mm": reference["observed_inner_lip_gap_mm"],
+        }
     manifest = {
-        "schema": "head_rgbd.delivery.manifest.v1",
+        "schema": "head_rgbd.delivery.manifest.v2",
         "software": {
             "name": "facecap_airway_delivery",
             "version": __version__,
@@ -395,18 +453,7 @@ def export_delivery(
         },
         "created_at": fit_report.get("created_at"),
         "status": "degraded" if warnings else "success",
-        "mesh": {
-            "path": final_mesh.name,
-            "stage": stage,
-            "state": state,
-            "unit": "m",
-            "meters_per_unit": MESH_METERS_PER_UNIT,
-            "coordinate_system": reference["coordinate_system"],
-            "vertices": geometry["vertices"],
-            "faces": geometry["faces"],
-            "extents_m": geometry["extents_m"],
-            "dense": geometry["vertices"] == fit_report["dense_topology"]["vertices"],
-        },
+        "mesh": mesh_payload,
         "configuration": {
             "steps": defaults_config["reconstruction"]["steps"],
             "points_per_frame": defaults_config["reconstruction"]["points_per_frame"],
@@ -430,8 +477,9 @@ def export_delivery(
             "sequence": str(sequence),
             "sequence_sha256": sequence_info["sha256"],
             "frames": frames,
-            "closed_reference_frame": reference["frame_id"],
-            "open_reference_frame": references["references"]["open"]["frame_id"],
+            "reference_frames": {state: exports[state]["reference"]["frame_id"] for state in states},
+            "closed_reference_frame": exports["closed"]["reference"]["frame_id"],
+            "open_reference_frame": exports["open"]["reference"]["frame_id"],
             "continuous_full_turn": False,
         },
         "sidecars": {
@@ -446,6 +494,7 @@ def export_delivery(
         + [
             "geometry accuracy is not independently verified: no scan registration, no manual contour",
             "support labels separate real observations, correlated bursts plus prior and unobserved completion",
+            "closed and open meshes are two states of one shared identity; they are not registered to each other by any external measurement",
             "this is a FaceCap-inspired offline FLAME prototype, not a FaceCap reproduction",
         ],
         "environment": {
@@ -456,6 +505,26 @@ def export_delivery(
     }
     write_json_exclusive(output / "manifest.json", manifest)
     return manifest
+
+
+def _state_warnings(exports: dict[str, dict[str, Any]], stage: str = "dense") -> list[str]:
+    """Flag a state whose reference frame has no usable open-mouth evidence."""
+    warnings: list[str] = []
+    for state, item in exports.items():
+        reference = item["reference"]
+        observed = reference.get("observed_inner_lip_gap_mm")
+        model = reference["stages"][stage]["inner_lip_gap_mm"]
+        if observed is None:
+            warnings.append(
+                f"{state} reference {reference['frame_id']}: inner lip depth invalid; "
+                f"gap is model prior ({model:.2f} mm), not a measured opening"
+            )
+        elif state == "open" and observed < 10.0:
+            warnings.append(
+                f"open reference {reference['frame_id']}: measured inner lip gap {observed:.2f} mm is small; "
+                "the open state may be weakly observed"
+            )
+    return warnings
 
 
 def _quality_warnings(fit_report: dict[str, Any], sequence_info: dict[str, Any], support: dict) -> list[str]:
@@ -539,10 +608,10 @@ def run_pipeline(
             },
             summary={
                 "algorithm": ALGORITHM,
-                "mesh": str(delivery / "head_m.obj"),
+                "meshes": {state: str(delivery / item["path"]) for state, item in manifest["mesh"]["states"].items()},
                 "manifest": str(delivery / "manifest.json"),
-                "vertices": manifest["mesh"]["vertices"],
-                "faces": manifest["mesh"]["faces"],
+                "vertices": {state: item["vertices"] for state, item in manifest["mesh"]["states"].items()},
+                "faces": {state: item["faces"] for state, item in manifest["mesh"]["states"].items()},
                 "status": manifest["status"],
             },
         )

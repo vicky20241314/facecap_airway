@@ -18,8 +18,14 @@
   },
   "export": {
     "mesh_stage": "dense",
-    "mesh_state": "closed",
-    "filename": "head_m.obj",
+    "mesh_states": [
+      "closed",
+      "open"
+    ],
+    "filenames": {
+      "closed": "head_closed_m.obj",
+      "open": "head_open_m.obj"
+    },
     "unit": "m"
   },
   "capture": {

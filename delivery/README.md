@@ -1,9 +1,10 @@
 # facecap_airway_delivery
 
-用一台 Orbbec Gemini 215 采集成人头部 RGB-D 数据，离线重建出**一份米制高分辨率人头网格**。
+用一台 Orbbec Gemini 215 采集成人头部 RGB-D 数据，离线重建出**米制高分辨率人头网格**：
+**一份闭口、一份张口**，同一共享身份、同一套拓扑。
 
 ```
-真实相机采集 → 离线重建 → 导出最终网格
+真实相机采集 → 离线重建 → 导出闭口网格 + 张口网格
 ```
 
 一条命令走完：
@@ -36,7 +37,7 @@
 | 系统 | Windows 10/11 x64 |
 | GPU | NVIDIA（重建用 CUDA；已验证 RTX 3060 Laptop 6 GB）。可用 `--device cpu`，但慢很多 |
 | 内存 | ≥ 16 GB |
-| 磁盘 | 运行目录约 7 GB（主要是 Python 环境），一次采集约 20 MB，一次输出约 25 MB |
+| 磁盘 | 运行目录约 7 GB（主要是 Python 环境），一次采集约 20 MB，一次输出约 50 MB（两个网格） |
 | 采集距离 | 0.3–0.7 m，正对镜头 |
 
 ---
@@ -68,6 +69,7 @@ facecap_airway_delivery/
 ├─ core/                        相机 SDK 封装、FLAME 装载、人脸/颈部解析
 ├─ third_party/                 FLAME 与 TUFA 源码（含各自 LICENSE）
 ├─ tests/test_contracts.py      小型核心契约测试
+├─ tools/verify_delivery.py     只读复核交付输出
 └─ runtime/                     ← 不进入 Git
    ├─ env/                      Python 3.10 环境（含 CUDA 版 PyTorch）
    ├─ assets/                   模型权重
@@ -139,7 +141,7 @@ cd D:\proiect\facecap_airway_delivery
 2. 按 4 个视角引导采集（每段 5 帧）；
 3. 保存原始数据 + 分段信息到 `runtime/captures/<时间戳>_head/`；
 4. 离线重建（CPU/GPU 串行，单卡）；
-5. 导出 `runtime/outputs/<采集名>_reconstruction/delivery/` 下的最终网格。
+5. 导出 `runtime/outputs/<采集名>_reconstruction/delivery/` 下的闭口与张口两个最终网格。
 
 ### 5.1 怎样站位、转头、闭口、张口
 
@@ -204,38 +206,55 @@ cd D:\proiect\facecap_airway_delivery
 
 ---
 
-## 6. 输出：只有一份最终网格
+## 6. 输出：闭口 + 张口，各一份最终网格
 
 `runtime/outputs/<采集名>_reconstruction/delivery/`：
 
 | 文件 | 内容 |
 |---|---|
-| `head_m.obj` | **唯一最终网格**：闭口参考帧的密集表面（20 018 顶点 / 39 904 面），单位**米** |
-| `manifest.json` | 运行清单（见下） |
-| `support.json` | 每个顶点的真实观测支持度标签 |
-| `reference_landmarks.json` | 闭口参考帧的 68 个标点（模型侧 + 原始观测侧） |
+| `head_closed_m.obj` | **闭口最终网格**：闭口参考帧的密集表面（20 018 顶点 / 39 904 面），单位**米** |
+| `head_open_m.obj` | **张口最终网格**：张口参考帧的同一套密集表面，单位**米** |
+| `manifest.json` | 运行清单（见下），两个状态都在 `mesh.states` 下 |
+| `support.json` | 每个顶点的真实观测支持度标签（两网格共享顶点顺序） |
+| `reference_landmarks.json` | 两个状态各自的 68 点（模型侧 + 原始观测侧）与刚体变换 |
 
 同目录的 `run_report.json` 与 `reconstruction/` 是审计记录（阶段命令、耗时、日志），
 **不是**给用户看的中间网格。粗网格、锚点网格、Loop 基面、插值网格、对比网格都不再导出。
+
+两个网格来自**同一次运行、同一个共享身份、同一套拓扑**（面表完全相同），
+差别只来自参考帧本身的姿态/表情/下颌：
+
+| | 闭口 | 张口 |
+|---|---|---|
+| 参考帧 | `closed_front_2` | `open_front_0` |
+| 内唇距（模型） | 1.92 mm | 26.95 mm |
+| 内唇距（原始观测） | 2.39 mm | 26.47 mm |
+
+任何一步缺失都会**直接报错**，不会用闭口帧冒充张口、也不会用模型先验伪造张口观测：
+张口参考帧必须是真实存在、且内唇深度有效的张口帧。
 
 ### 6.1 单位、坐标与参考帧
 
 - **单位**：米（OBJ 顶点数值即米）。深度原始数据为毫米，内部换算后求解。
 - **坐标系**：`X 向右 / Y 向上 / Z 向后`（相机右手系，Z 朝相机后方，即脸在 z<0 一侧）。
-  单位与坐标都会写进 `manifest.json` 的 `mesh.unit` / `mesh.coordinate_system`。
-- **参考帧**：`closed_front_*` 中真实存在、且深度有效的那一帧闭口正面帧（默认 `closed_front_2`）。
-  网格是"该参考帧相机坐标下的闭口几何"，不是世界坐标，也不是扫描仪坐标。
-- `reference_landmarks.json` 里同时给出 `animated_model_to_reference_camera_4x4`
-  与逆变换，说明是纯刚体坐标变换，**不是**扫描配准。
+  单位与坐标写进 `manifest.json` 的 `mesh.unit` / `mesh.states.<state>.coordinate_system`。
+- **参考帧**：闭口取 `closed_front_*` 中真实存在且深度有效的那一帧（默认 `closed_front_2`），
+  张口取 `open_front_*` 中的一帧（默认 `open_front_0`）。
+  两个网格各自在**自己的参考帧相机坐标**下，**不是**世界坐标，也不是扫描仪坐标。
+- **不要直接把两个网格叠在一起比较**：它们分属两个不同的参考相机坐标系，
+  两者之间没有做任何外部配准；`reference_landmarks.json` 里给出的
+  `animated_model_to_reference_camera_4x4` 只是各自状态内的纯刚体变换。
+- 要对比闭口/张口，请在**同一坐标系**下用 FLAME 参数或标点做刚体对齐后再比。
 
 ### 6.2 manifest.json 记录什么
 
-软件版本与算法来源、配置参数、输入采集与参考帧、网格单位/坐标系/顶点数/面数、
-`success | degraded` 状态、关键质量警告、支持度统计、颈部独立补片、限制说明。
+软件版本与算法来源、配置参数、输入采集、两个参考帧、每个状态的网格路径/单位/坐标系/
+顶点数/面数/包围盒、内唇距（模型与观测）、`success | degraded` 状态、关键质量警告、
+支持度统计、颈部独立补片、限制说明。
 
 ### 6.3 支持度怎么读
 
-`support.json` 的 `labels` 三类，`vertex_label` 与 `head_m.obj` 顶点顺序一一对应：
+`support.json` 的 `labels` 三类，`vertex_label` 与**两个网格共同**的顶点顺序一一对应：
 
 | 标签 | 含义 |
 |---|---|
@@ -244,6 +263,9 @@ cd D:\proiect\facecap_airway_delivery
 | `unobserved_completion` | **没有真实观测**，完全由模型补全 |
 
 **插值出来的标签不算新增真实观测**；`confidence` 只是启发式权重，不是标定概率。
+支持度在同一次共享身份拟合中累计，**不是**按闭口/张口分别重算，
+因此只在张口或只在闭口阶段看到的区域无法在这份文件里区分。
+张口状态的内唇、口腔内侧本来就缺少深度，属于模型先验。
 
 ---
 
@@ -260,7 +282,7 @@ cd D:\proiect\facecap_airway_delivery
 | 3 | 运动 | `motion_v2` | **先**解释每帧姿态/表情/下颌，再谈深度 |
 | 4 | 低频身份 | `identity_v2` | 带正面保护的低频身份修正 |
 | 5 | 运动重估 | `motion_v2 --identity-field` | 身份固定后重估运动 |
-| 6 | 密集细化 | `fit_d --dense-mode loop-research` | 同拓扑 Loop 基面 + 真实深度残差，最终网格 |
+| 6 | 密集细化 | `fit_d --dense-mode loop-research` | 同拓扑 Loop 基面 + 真实深度残差，产出闭口/张口两个最终网格 |
 
 必须保留的约束（不是可选优化）：
 
@@ -320,7 +342,7 @@ cd D:\proiect\facecap_airway_delivery
 | 正面锚 + 共享身份（C，GPU） | 328 s |
 | 固定身份运动 → 低频身份 → 运动重估（GPU） | 477 s |
 | 密集 Loop + 真实深度残差（CPU 求解，GPU 仅初始化） | 1 811 s |
-| **合计（`reconstruct` 全程，含导出）** | **约 44 min** |
+| **合计（`reconstruct` 全程，含导出两个网格）** | **约 44 min** |
 | 仅再导出（`export`） | 约 2 s |
 
 口径：`run_report.json` 中每个阶段的墙钟时间；GPU 段包含进程启动与导出。
@@ -333,3 +355,6 @@ cd D:\proiect\facecap_airway_delivery
 `0.2.0`。`VERSION`、`--version`、`README`、`manifest.json` 四处一致。
 历史见 `CHANGELOG.md`：本次变化是**最终流程整合、入口精简、输出收敛**，
 不包含任何算法精度提升的声明。
+
+> 0.2.0 发布时默认只导出闭口网格；同版本的后续修订按要求改为**闭口 + 张口各一份**，
+> 版本号不变、不新增研究模式，算法与参数完全未改。

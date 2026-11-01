@@ -80,7 +80,11 @@ class EntryPointContract(unittest.TestCase):
         self.assertEqual(defaults["algorithm"]["name"], pipeline.ALGORITHM)
         self.assertEqual(defaults["algorithm"]["fixed_ray_policy"], "strict-coverage")
         self.assertEqual(defaults["export"]["unit"], "m")
-        self.assertEqual(defaults["export"]["filename"], "head_m.obj")
+        self.assertEqual(defaults["export"]["mesh_states"], ["closed", "open"])
+        self.assertEqual(
+            defaults["export"]["filenames"],
+            {"closed": "head_closed_m.obj", "open": "head_open_m.obj"},
+        )
 
     def test_frozen_stage_order_is_reproduced(self):
         calls: list[tuple[str, str]] = []
@@ -306,32 +310,38 @@ class ExportContract(unittest.TestCase):
         )
         faces = np.array([[0, 1, 2], [1, 3, 2]])
         trimesh.Trimesh(vertices, faces, process=False).export(fit / "closed_dense_m.obj")
-        landmarks = vertices[[0, 1, 2]]
+        open_vertices = vertices.copy()
+        open_vertices[2, 1] += 0.010  # one shared identity, jaw opened
+        trimesh.Trimesh(open_vertices, faces, process=False).export(fit / "open_dense_m.obj")
+
+        def state_reference(state, frame, mesh, points, gap, observed_gap):
+            return {
+                "frame_id": frame,
+                "source_frame": 2,
+                "timestamp_s": 12.0,
+                "coordinate_system": "reference camera X_right_Y_up_Z_backward",
+                "mesh_unit": "m",
+                "observed_landmarks_m": [None] * 68,
+                "observed_valid": [False] * 68,
+                "observed_inner_lip_gap_mm": observed_gap,
+                "animated_model_to_reference_camera_4x4": np.eye(4).tolist(),
+                "reference_camera_to_animated_model_4x4": np.eye(4).tolist(),
+                "transform_scope": "rigid coordinate transform only",
+                "stages": {
+                    "dense": {
+                        "mesh": mesh,
+                        "landmarks_m": points.tolist(),
+                        "landmark_triangle_indices": [0, 0, 0],
+                        "landmark_barycentric": [[1, 0, 0], [0, 1, 0], [0, 0, 1]],
+                        "inner_lip_gap_mm": gap,
+                    }
+                },
+            }
+
         reference = {
             "references": {
-                "closed": {
-                    "frame_id": "closed_front_2",
-                    "source_frame": 2,
-                    "timestamp_s": 12.0,
-                    "coordinate_system": "reference camera X_right_Y_up_Z_backward",
-                    "mesh_unit": "m",
-                    "observed_landmarks_m": [None] * 68,
-                    "observed_valid": [False] * 68,
-                    "observed_inner_lip_gap_mm": None,
-                    "animated_model_to_reference_camera_4x4": np.eye(4).tolist(),
-                    "reference_camera_to_animated_model_4x4": np.eye(4).tolist(),
-                    "transform_scope": "rigid coordinate transform only",
-                    "stages": {
-                        "dense": {
-                            "mesh": "closed_dense_m.obj",
-                            "landmarks_m": landmarks.tolist(),
-                            "landmark_triangle_indices": [0, 0, 0],
-                            "landmark_barycentric": [[1, 0, 0], [0, 1, 0], [0, 0, 1]],
-                            "inner_lip_gap_mm": 10.0,
-                        }
-                    },
-                },
-                "open": {"frame_id": "open_front_0"},
+                "closed": state_reference("closed", "closed_front_2", "closed_dense_m.obj", vertices[[0, 1, 2]], 10.0, None),
+                "open": state_reference("open", "open_front_0", "open_dense_m.obj", open_vertices[[0, 1, 2]], 20.0, 26.0),
             }
         }
         (fit / "reference_geometry.json").write_text(json.dumps(reference), encoding="utf-8")
@@ -378,7 +388,7 @@ class ExportContract(unittest.TestCase):
         )
         return fit, sequence
 
-    def test_exactly_one_mesh_and_required_sidecars(self):
+    def test_exactly_one_mesh_per_state_and_required_sidecars(self):
         with tempfile.TemporaryDirectory() as name:
             root = Path(name)
             fit, sequence = self._fit_fixture(root)
@@ -393,16 +403,56 @@ class ExportContract(unittest.TestCase):
                 defaults=pipeline.load_defaults(),
             )
             exported = sorted(path.name for path in output.iterdir())
-            self.assertEqual(exported, ["head_m.obj", "manifest.json", "reference_landmarks.json", "support.json"])
-            self.assertEqual(manifest["mesh"]["path"], "head_m.obj")
-            self.assertEqual(manifest["mesh"]["unit"], "m")
-            self.assertEqual(manifest["mesh"]["vertices"], 4)
-            self.assertEqual(manifest["status"], "degraded")  # missing oblique warning absent, deviation ok
+            self.assertEqual(
+                exported,
+                [
+                    "head_closed_m.obj",
+                    "head_open_m.obj",
+                    "manifest.json",
+                    "reference_landmarks.json",
+                    "support.json",
+                ],
+            )
+            meshes = manifest["mesh"]
+            self.assertEqual(meshes["unit"], "m")
+            self.assertTrue(meshes["topology_shared"])
+            self.assertEqual(set(meshes["states"]), {"closed", "open"})
+            for state in ("closed", "open"):
+                self.assertEqual(meshes["states"][state]["vertices"], 4)
+                self.assertEqual(meshes["states"][state]["faces"], 2)
+            # Both states are exported, and the open one really is a different shape.
+            self.assertNotEqual(
+                meshes["states"]["closed"]["extents_m"],
+                meshes["states"]["open"]["extents_m"],
+            )
+            self.assertEqual(meshes["states"]["open"]["reference_frame"], "open_front_0")
+            self.assertEqual(meshes["states"]["closed"]["reference_frame"], "closed_front_2")
             support = json.loads((output / "support.json").read_text(encoding="utf-8"))
             self.assertEqual(support["counts"], [1, 1, 2])
+            self.assertEqual(support["applies_to"], ["head_closed_m.obj", "head_open_m.obj"])
             landmarks = json.loads((output / "reference_landmarks.json").read_text(encoding="utf-8"))
-            self.assertIsNone(landmarks["observed_landmarks_m"][0])
-            self.assertEqual(landmarks["landmark_count"], 3)
+            self.assertEqual(set(landmarks["states"]), {"closed", "open"})
+            self.assertIsNone(landmarks["states"]["closed"]["observed_landmarks_m"][0])
+            self.assertEqual(landmarks["states"]["closed"]["landmark_count"], 3)
+            self.assertEqual(landmarks["states"]["open"]["mesh"], "head_open_m.obj")
+
+    def test_missing_open_reference_is_a_hard_error(self):
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name)
+            fit, sequence = self._fit_fixture(root)
+            reference = json.loads((fit / "reference_geometry.json").read_text(encoding="utf-8"))
+            del reference["references"]["open"]["stages"]
+            (fit / "reference_geometry.json").write_text(json.dumps(reference), encoding="utf-8")
+            with self.assertRaises(ValueError):
+                pipeline.export_delivery(
+                    fit=fit,
+                    sequence=sequence,
+                    output=root / "delivery",
+                    runtime=root,
+                    capture=None,
+                    runner=None,
+                    defaults=pipeline.load_defaults(),
+                )
 
     def test_existing_mesh_is_never_overwritten(self):
         with tempfile.TemporaryDirectory() as name:
@@ -410,7 +460,7 @@ class ExportContract(unittest.TestCase):
             fit, sequence = self._fit_fixture(root)
             output = root / "delivery"
             output.mkdir()
-            (output / "head_m.obj").write_text("v 0 0 0\n", encoding="utf-8")
+            (output / "head_open_m.obj").write_text("v 0 0 0\n", encoding="utf-8")
             with self.assertRaises(FileExistsError):
                 pipeline.export_delivery(
                     fit=fit,
