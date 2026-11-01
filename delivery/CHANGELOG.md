@@ -56,6 +56,13 @@ not shipped here.
   `status: skipped_no_free_vertices` and returns the unchanged field instead of
   entering the solver.
 
+- Documentation: `README.md` gains §5.3 fast-path usage, §7.1 the visibility
+  kernel, §7.2 what the fast path skips and what it keeps (with the measured
+  time/MAE trade-off of each round count), §7.3 the `report.json` evidence
+  fields, and §9.1 the three-way per-stage timing table. The technical write-up
+  ships as `docs/FAST_PATH_REPORT.md`, which also lists the early design
+  assumptions this work disproved so they are not reused.
+
 ## 0.2.0 - 2026-11-01
 
 Final-flow consolidation, entry-point reduction and output convergence. This

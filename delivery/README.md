@@ -49,6 +49,8 @@ facecap_airway_delivery/
 ├─ README.md                    本说明
 ├─ VERSION                      0.3.0
 ├─ CHANGELOG.md
+├─ VALIDATION.md                本机实际验证记录
+├─ docs/FAST_PATH_REPORT.md     0.3.0 加速版算法：实测、消融与剩余热点（权威）
 ├─ LICENSE / THIRD_PARTY_NOTICES.md
 ├─ requirements.txt             重建环境所需的精确版本
 ├─ headrgbd.cmd / headrgbd.ps1  唯一启动入口
@@ -64,6 +66,7 @@ facecap_airway_delivery/
 │  ├─ motion_v2.py              逐帧姿态/表情/下颌
 │  ├─ identity_v2.py            低频共享身份（正面保护）
 │  ├─ fit_d.py                  密集表面与最终导出
+│  ├─ ray_index.py              可见性内核：投影栅格 + 精确 Möller–Trumbore
 │  ├─ geometry_c.py / geometry_d.py / surface_v2.py   对应、保护、Loop、证据
 │  └─ ...
 ├─ core/                        相机 SDK 封装、FLAME 装载、人脸/颈部解析
@@ -204,6 +207,23 @@ cd D:\proiect\facecap_airway_delivery
 .\headrgbd.cmd export --run runtime\outputs\<run>
 ```
 
+#### 快速流程（0.3.0 起可用）
+
+```pwsh
+# 约 5 分钟的完整重建：跳过密集残差求解，中频校正跑 1 轮
+.\headrgbd.cmd reconstruct --capture <dir> --fast --mid-rounds 1
+
+# 更保守：中频 2 轮（更慢，见 §7.2 的代价表）
+.\headrgbd.cmd reconstruct --capture <dir> --fast --mid-rounds 2
+
+# 不加 --fast 就是默认流程，与 0.2.0 的算法链一致，只是换掉了射线求交内核
+.\headrgbd.cmd reconstruct --capture <dir>
+```
+
+`--fast` 不是"质量旋钮"，而是**一个明确的算法定义**：交付面取 Loop 基面，不再求解密集
+残差。被跳过的计算会在 `report.json` 里标成 `not_executed` 并写明原因，不会伪装成
+"求解成功、位移为 0"。取舍数据见 §7.2。
+
 ---
 
 ## 6. 输出：闭口 + 张口，各一份最终网格
@@ -294,6 +314,54 @@ cd D:\proiect\facecap_airway_delivery
 - 颈部单独处理（独立跟踪、按段输出观测补片，不参与身份拟合）；
 - 每帧仍导出真实支持度标签。
 
+### 7.1 可见性内核（0.3.0 起）
+
+所有可见性查询都从相机中心射出，所以一条射线完全由它反投影到的三维点决定。据此把
+三角形投影到相机视线平面（`u = x/-z`，`v = y/-z`）建均匀栅格索引，窄相位用精确的
+Möller–Trumbore。实现：`head_rgbd/ray_index.py`。
+
+- 实测 **0.644 ms/条 → 0.0072 ms/条**（约 90×，含索引构建）；
+- 与旧的 rtree 查询在真实网格 + 真实深度采样射线上：命中数相同、命中面 **100 %** 相同、
+  交点差 **0.15 µm**；
+- 它位于 `ray_surface` 与 `front_protected_vertices` 之下，所以身份拟合、运动、正面保护、
+  覆盖验收和最终支持度**全部**受益——这也是前段能从 11 分钟降到 2 分钟的原因，不只是密集段；
+- 语义未变：首命中、射线编号、双面查询、遮挡与缺失语义、`max_depth/max_plane` 门限全部保留。
+
+### 7.2 快速流程：跳过什么、保留什么
+
+| 项 | 默认流程 | `--fast` |
+|---|---|---|
+| 低频身份校正 | 2 轮 | 2 轮（**保留**，位移 0.28 / 0.27 mm） |
+| 中频校正 | 3 轮 | `--mid-rounds` 轮，默认 2 |
+| 密集残差 QP | `front_anchor_dense` + `guarded_dense` | **不执行**，交付 Loop 基面 |
+| regularized 中间支持度 | 计算 | 不计算（只服务预览图与复用 sidecar） |
+| 几何/解剖/覆盖验收 | 全部 | **全部保留** |
+
+同一采集、同一上游下的取舍（闭口全脸 MAE，同帧同观测）：
+
+| 配置 | 完整耗时 | MAE (mm) |
+|---|---|---|
+| 中频 0 轮，无密集残差 | 211.5 s | 1.2927 |
+| **中频 1 轮，无密集残差（`--fast --mid-rounds 1`，推荐）** | **298.3 s** | **1.2874** |
+| 中频 2 轮，无密集残差（`--fast` 默认） | 403.3 s | 1.2861 |
+| 中频 2 轮，有密集残差（默认流程） | 865.4 s | 1.2750 |
+
+读法：中频从 0 加到 2 轮只买回 0.0066 mm，密集残差买回 0.0111 mm；被省略的部分在这份
+采集上合计只值 **0.018 mm**。`--mid-rounds` 默认取 2 是保守值，若时间优先用 1。
+
+### 7.3 `report.json` 里的执行证据
+
+| 字段 | 含义 |
+|---|---|
+| `fast_path` | `{enabled, dense_residual, mid_frequency_rounds, regularized_evidence}` |
+| `field_logs.dense.status` | `not_executed` + `reason`（跳过时），不是"求解成功" |
+| `field_logs.regularized.status` | `skipped_no_free_vertices`（零自由度，保留初始场） |
+| `field_logs.*.history[].timing` | 对应关系 / 系统装配 / QP setup / QP 求解 / 线搜索 / 几何检查 / 固定射线 的分项秒数 |
+| `field_logs.*.history[].actual_update_mm` | 该轮接受后表面的**真实最大位移**（mm），不是步长系数 |
+| `field_logs.*.stop_reason` | 提前停止原因；判据是"实际位移小于一个深度量化步长 且 固定射线 MSE 改善 < 1e-4"，**步长系数不参与判据** |
+| `timing_sections` | 阶段内各分区的墙钟耗时，分区之和等于阶段总耗时 |
+
+
 ---
 
 ## 8. 常见失败与恢复
@@ -334,19 +402,38 @@ cd D:\proiect\facecap_airway_delivery
 
 ---
 
-## 9.1 实测耗时（RTX 3060 Laptop 6 GB，20 帧真实采集）
+## 9.1 实测耗时（同一台机器，RTX 3060 Laptop 6 GB，20 帧真实采集）
 
-| 阶段 | 耗时 |
-|---|---|
-| 原始采集导入 + 准备（TUFA/YuNet/UniFace，CPU 推理） | 35 s |
-| 正面锚 + 共享身份（C，GPU） | 328 s |
-| 固定身份运动 → 低频身份 → 运动重估（GPU） | 477 s |
-| 密集 Loop + 真实深度残差（CPU 求解，GPU 仅初始化） | 1 811 s |
-| **合计（`reconstruct` 全程，含导出两个网格）** | **约 44 min** |
-| 仅再导出（`export`） | 约 2 s |
+三列是同一采集、同一台机器、同一份 `prepared` 序列的实测；单位秒。
 
-口径：`run_report.json` 中每个阶段的墙钟时间；GPU 段包含进程启动与导出。
-采集本身另有约 40 s（4 段，含人工倒数）。
+| 阶段 | 0.2.0 | 0.3.0 默认 | 0.3.0 `--fast --mid-rounds 1` |
+|---|---|---|---|
+| 准备（TUFA/YuNet/UniFace，CPU 推理） | 33.5 | 36.8 | 36.2 |
+| 正面锚 `fit_c --front-only` | 101.6 | 29.9 | 28.6 |
+| 共享身份 `fit_c --front-anchor` | 241.0 | 38.8 | 38.3 |
+| 固定身份运动 `motion_v2` | 139.2 | 21.8 | 21.8 |
+| 低频身份 `identity_v2` | 137.3 | 19.7 | 19.8 |
+| 运动重估 `motion_v2 --identity-field` | 154.8 | 22.2 | 22.0 |
+| 密集 Loop + 残差 `fit_d`（CPU 求解） | 1131.6 | 689.0 | 124.2 |
+| **合计（含导出两个网格）** | **1945.7 s ≈ 32.4 min** | **865.4 s ≈ 14.4 min** | **298.3 s ≈ 5.0 min** |
+| 加速比 | 1.00× | **2.24×** | **6.52×** |
+
+两段收益分开报，不要相乘也不要相加：
+
+- 只替换射线内核、不跳过任何阶段：1945.7 → 865.4 s（**2.24×**）；
+- 在此之上再加 `--fast --mid-rounds 1`：865.4 → 298.3 s（**2.90×**）。
+
+`export`（只再导出，不重跑拟合）仍约 2 s。
+
+口径：`run_report.json` 中每个阶段的墙钟时间，含进程启动与导出。0.3.0 的密集段还有
+`report.json:timing_sections` 给出阶段内分区耗时。本表取代此前 README 中"约 44 min"的
+记录——那是更早一次不同条件的运行，与这里的可复现配置不是同一组数字。
+
+剩余热点：`fit_d` 的中频 QP（936 个自由变量、约 22 万约束行、单轮 9 800–16 600 次
+OSQP 迭代）。要再压缩需要改 QP 的缩放/条件数，本轮未做，因为会改变可行域上的数值行为。
+
+逐阶段耗时表、消融实验、质量对比口径与"哪些早期结论已被推翻"，见
+`docs/FAST_PATH_REPORT.md`。
 
 ---
 
