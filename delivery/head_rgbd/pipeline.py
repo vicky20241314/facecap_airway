@@ -133,6 +133,8 @@ def reconstruct_locked(
 ) -> Path:
     """Run the frozen chain. No mode switch, no alternative solver, no policy flag."""
     common = _fit_arguments(args)
+    joint_mode = getattr(args, "shape_fusion", "guarded")
+    joint = joint_mode == "joint"
     anchor = destination / "front_anchor"
     require_stage_success(
         runner,
@@ -157,7 +159,7 @@ def reconstruct_locked(
     require_stage_success(
         runner,
         runner.run(
-            "shared_identity_guarded",
+            "shared_identity_joint" if joint else "shared_identity_guarded",
             "head_rgbd.fit_c",
             [
                 "--sequence",
@@ -171,6 +173,9 @@ def reconstruct_locked(
                 str(args.expression_components),
                 "--runtime",
                 runner.runtime,
+                "--shape-fusion",
+                joint_mode,
+                *(["--side-depth-weight", str(args.side_depth_weight)] if joint else []),
             ],
         ),
     )
@@ -258,6 +263,9 @@ def reconstruct_locked(
                 "--points",
                 str(args.dense_points),
                 *(["--fast"] if getattr(args, "fast", False) else []),
+                "--shape-fusion",
+                joint_mode,
+                *(["--joint-front-confidence", str(args.joint_front_confidence)] if joint else []),
                 *(["--mid-rounds", str(args.mid_rounds)] if getattr(args, "fast", False) else []),
             ],
         ),

@@ -26,7 +26,8 @@ def load_npz(path):
         return {key: z[key] for key in z.files}
 
 
-def reconstruct(sequence, initial_fit, output, settings, mode,dense_mode='absolute',regularized_fit=None,fast=False):
+def reconstruct(sequence, initial_fit, output, settings, mode,dense_mode='absolute',regularized_fit=None,fast=False,
+                shape_fusion='guarded',joint_front_confidence=.15):
     started = time.perf_counter()
     # Coarse wall-clock marks for the blocks that run OUTSIDE solve_field. The
     # per-outer accounting inside solve_field cannot see subdivision, Loop base
@@ -57,6 +58,10 @@ def reconstruct(sequence, initial_fit, output, settings, mode,dense_mode='absolu
     identity = [int(i) for i in params['identity_selected']]
     front = [i for i, row in enumerate(rows) if row['view']=='front']
     front_identity = [i for i in identity if rows[i]['view']=='front']
+    # Joint fusion feeds every closed identity view into the control field; the
+    # guarded control keeps the original front-only anchor stages.
+    joint = shape_fusion=='joint'
+    shape_frames = identity if joint else front_identity
     assert all(rows[i]['state']=='closed' for i in identity)
     excluded = anatomical_exclusion(base, data, front, params['mouth_identity_excluded'])
     if dense_mode in ('hierarchical','loop-research') and settings.solver!='qp':
@@ -87,7 +92,7 @@ def reconstruct(sequence, initial_fit, output, settings, mode,dense_mode='absolu
         # Restart from the coarse model, never smooth the noisy v0.1 field.
         low_settings=replace(settings,gradient_length_mm=8.,bending_length_mm=8.,outer_steps=2,
                              displacement_bound_mm=2.5) if settings.research_v2 else settings
-        anchor, _, anchor_log = solve_field(base, faces, direction, data, rows, front_identity,
+        anchor, _, anchor_log = solve_field(base, faces, direction, data, rows, shape_frames,
                                            excluded, low_settings, stage='front_anchor_low_frequency' if settings.research_v2 else 'front_anchor_regularized')
         if settings.research_v2:
             low_anchor=anchor.copy()
@@ -97,7 +102,7 @@ def reconstruct(sequence, initial_fit, output, settings, mode,dense_mode='absolu
             # updates (0.185 mm, 0.171 mm) and initialise the guarded solve.
             mid_settings=replace(settings,displacement_bound_mm=2.5,
                                  outer_steps=settings.mid_rounds if fast else settings.outer_steps)
-            anchor,_,mid_log=solve_field(base,faces,direction,data,rows,front_identity,excluded,
+            anchor,_,mid_log=solve_field(base,faces,direction,data,rows,shape_frames,excluded,
                 mid_settings,initial=anchor,stage='front_anchor_mid_frequency')
             mid_log['fast_path_rounds']=mid_settings.outer_steps
             anchor_log['mid_frequency']=mid_log
@@ -105,9 +110,18 @@ def reconstruct(sequence, initial_fit, output, settings, mode,dense_mode='absolu
     mark('front_anchor_low_and_mid')
     if regularized_fit is None and mode=='guarded':
         protected = front_protected_vertices(regular_anchor_vertices, faces, data, front)
-        regularized, support_regular, regular_log = solve_field(
-            base, faces, direction, data, rows, identity, excluded, replace(settings,displacement_bound_mm=2.5) if settings.research_v2 else settings,
-            initial=anchor, locked=protected, stage='guarded_regularized')
+        regular_settings=replace(settings,displacement_bound_mm=2.5) if settings.research_v2 else settings
+        if joint:
+            # The frontal hard lock becomes a confidence weight, so the region the
+            # previous chain froze can respond to observations that outvote the prior.
+            confidence=np.where(protected,joint_front_confidence,1.)
+            regularized, support_regular, regular_log = solve_field(
+                base, faces, direction, data, rows, identity, excluded, regular_settings,
+                initial=anchor, soft_lock=confidence, stage='joint_confidence_weighted_regularized')
+        else:
+            regularized, support_regular, regular_log = solve_field(
+                base, faces, direction, data, rows, identity, excluded, regular_settings,
+                initial=anchor, locked=protected, stage='guarded_regularized')
     elif regularized_fit is None:
         protected = np.zeros(base.shape[1], bool)
         regularized, support_regular, regular_log = solve_field(
@@ -184,7 +198,7 @@ def reconstruct(sequence, initial_fit, output, settings, mode,dense_mode='absolu
         mark('guarded_dense')
     else:
         dense_anchor, _, dense_anchor_log = solve_field(
-            dense_fit_base, dense_faces, dense_direction, data, rows, front_identity, dense_excluded,
+            dense_fit_base, dense_faces, dense_direction, data, rows, shape_frames, dense_excluded,
             dense_settings, locked=dense_locked,stage='front_anchor_dense',**options)
         dense_anchor_vertices = surface_state(dense_fit_base, dense_direction, dense_anchor)
         mark('dense_front_anchor')
@@ -293,6 +307,11 @@ def reconstruct(sequence, initial_fit, output, settings, mode,dense_mode='absolu
     write_json(output/'report.json', dict(schema='head_rgbd.d.fit.v1', project_version=__version__,
         algorithm='v2 research: alternating fixed-identity motion initialization, FEM total deformation and budgeted measured Loop surface' if settings.research_v2 else 'D research: measured shared normal field, area quadrature and physical regularization',
         mode=mode,dense_mode=dense_mode,research_v2=settings.research_v2,loop_base=loop_log,research_only=True, full_facecap_reproduction=False,
+        shape_fusion=dict(mode=shape_fusion,joint_front_confidence=joint_front_confidence,
+            identity_views=[rows[i]['view'] for i in shape_frames],
+            shape_frames=[rows[i]['id'] for i in shape_frames],
+            front_hard_locked_vertices=0 if joint else int(protected.sum()),
+            front_downweighted_vertices=int(protected.sum()) if joint else 0),
         fast_path=dict(enabled=fast,
             dense_residual='not_executed; delivered surface is the Loop base' if fast else 'executed',
             mid_frequency_rounds=(anchor_log.get('mid_frequency') or {}).get('fast_path_rounds', settings.outer_steps),
@@ -347,6 +366,10 @@ def main():
                         help='deliver the Loop base without a dense residual solve and stop mid-frequency after --mid-rounds')
     parser.add_argument('--mid-rounds', type=int, default=2,
                         help='mid-frequency correction rounds on the fast path')
+    parser.add_argument('--shape-fusion', choices=('guarded', 'joint'), default='guarded',
+                        help='joint: every closed identity view shapes the control field; guarded: front only')
+    parser.add_argument('--joint-front-confidence', type=float, default=.15,
+                        help='joint: data weight of a front-covered vertex instead of a hard lock')
     args = parser.parse_args()
     if args.points < 500 or min(args.gradient_length_mm, args.bending_length_mm,args.dense_residual_bound_mm) <= 0 or args.dense_residual_bound_mm> .5:
         parser.error('invalid sampling/physical regularization')
@@ -355,7 +378,8 @@ def main():
                 Settings(solver=args.solver, points=args.points, research_v2=args.research_v2,fixed_ray_policy=args.fixed_ray_policy,noise_floor_mm=1/np.sqrt(12) if args.research_v2 else .7,gradient_length_mm=args.gradient_length_mm,
                          bending_length_mm=args.bending_length_mm,dense_residual_bound_mm=args.dense_residual_bound_mm,
                          mid_rounds=args.mid_rounds), args.mode,
-                args.dense_mode,args.regularized_fit.resolve() if args.regularized_fit else None, args.fast)
+                args.dense_mode,args.regularized_fit.resolve() if args.regularized_fit else None, args.fast,
+                args.shape_fusion,args.joint_front_confidence)
 
 
 if __name__=='__main__':

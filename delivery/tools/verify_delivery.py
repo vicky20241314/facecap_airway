@@ -77,7 +77,7 @@ def verify(delivery: Path) -> dict:
 
     project = Path(__file__).resolve().parents[1]
     version = (project / "VERSION").read_text(encoding="utf-8").strip()
-    assert manifest["software"]["version"] == version == "0.3.0", "version mismatch across VERSION/manifest"
+    assert manifest["software"]["version"] == version == "0.4.0", "version mismatch across VERSION/manifest"
     assert manifest["software"]["algorithm"] == "facecap-inspired-v2-strict"
 
     state_report = {}

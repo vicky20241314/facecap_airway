@@ -40,9 +40,18 @@ def main():
     p.add_argument('--steps',type=int,default=240);p.add_argument('--keyframes-per-segment',type=int,default=3)
     p.add_argument('--expression-components',type=int,default=30)
     p.add_argument('--front-anchor',type=Path,help='conservative side-detail mode; preserve this real front-only identity/motion')
+    p.add_argument('--shape-fusion',choices=['guarded','joint'],default='guarded',
+        help='joint: every closed view updates the shared FLAME identity; guarded: freeze it (reproducible control)')
+    p.add_argument('--side-depth-weight',type=float,default=1.,
+        help='joint mode: weight of a side view depth term relative to a front view')
+    p.add_argument('--joint-shape-prior',type=float,default=.02,
+        help='joint mode: finite soft pull of the shared identity back to the front anchor')
     p.add_argument('--runtime',type=Path,help='runtime root containing assets')
     a=p.parse_args()
     if a.front_anchor and a.front_only:p.error('anchor mode requires real oblique input')
+    if a.shape_fusion=='joint' and not a.front_anchor:
+        p.error('joint shape fusion needs a front-only anchor as its initialization')
+    if a.side_depth_weight<0 or a.joint_shape_prior<0:p.error('joint weights must not be negative')
     if a.steps<40 or a.points<100 or not 10<=a.expression_components<=50:p.error('invalid fitting budget/components')
     paths=configure_environment(a.runtime);all_assets=asset_paths(paths.runtime)
     torch.set_num_threads(4);torch.manual_seed(1234);rng=np.random.default_rng(1234)
@@ -61,6 +70,7 @@ def main():
     for r in rows:
         with np.load(a.sequence.parent/r['file'],allow_pickle=False) as d:data.append({k:d[k] for k in d.files})
     n=len(rows);dev=torch.device(a.device);T=lambda x:torch.as_tensor(x,device=dev,dtype=torch.float32)
+    joint=a.shape_fusion=='joint'
     anchor_report=None;anchor=None;anchored_ids=[]
     if a.front_anchor:
         anchor_report=json.loads((a.front_anchor/'report.json').read_text(encoding='utf-8'))
@@ -115,8 +125,9 @@ def main():
             for i in anchored_ids:
                 j=anchor_index[rows[i]['id']];expr[i]=T(anchor['expression'][j]);jaw[i]=T(anchor['jaw'][j])
         for i,r in enumerate(rows):
-            if i in anchored_ids:r['role']='front_identity_anchor' if i in identity_ids else 'front_motion_anchor'
+            if i in anchored_ids:r['role']='joint_identity_anchor' if joint else ('front_identity_anchor' if i in identity_ids else 'front_motion_anchor')
             elif i in identity_ids:r['role']='side_identity_detail_and_motion'
+    anchor_shape=T(anchor['shape']) if joint and anchor is not None else None
     opt=torch.optim.Adam([{'params':[shape,expr],'lr':.025},{'params':[jaw,rotation],'lr':.002},{'params':[trans],'lr':.0005}])
     target3=[T(np.nan_to_num(d['xyz'])) for d in data];target2=[T(np.nan_to_num(d['uv'])) for d in data]
     masks=[];masks2=[];points=[];identity_points=[]
@@ -142,11 +153,22 @@ def main():
         stage=min(np.searchsorted(cuts[1:],step,side='right'),4);identity_phase=stage in (1,3)
         phase=phase_names[stage];active=identity_ids if identity_phase else good
         if anchor is not None:
-            phase=['side_motion_initial','side_rigid_alignment','side_expression','side_surface_alignment','side_motion_final'][stage]
-            active=[i for i in active if i not in anchored_ids]
+            phase=['joint_motion_initial','joint_identity_large','joint_expression_reestimate',
+                   'joint_identity_surface','joint_motion_final'][stage] if joint else [
+                'side_motion_initial','side_rigid_alignment','side_expression',
+                'side_surface_alignment','side_motion_final'][stage]
+            if not joint:
+                # Guarded control: the front anchor is final, so front frames keep
+                # their identity and motion and only side frames are refined.
+                active=[i for i in active if i not in anchored_ids]
         if not active:raise ValueError('no unanchored real frames')
         opt.zero_grad();raw,v,l,R=forward();loss=v.sum()*0
-        view_weights={i:3. if identity_phase and rows[i]['view']=='front' else 1. for i in active}
+        if joint and identity_phase:
+            # One vote per closed view on the shared identity. The side multiplier
+            # scales only the depth term, so landmarks stay comparable across views.
+            view_weights={i:1. for i in active}
+        else:
+            view_weights={i:3. if identity_phase and rows[i]['view']=='front' else 1. for i in active}
         denominator=sum(view_weights.values())
         # First phase uses landmarks. Later phases use true triangle surfaces.
         if stage>0 and (step==cuts[stage] or (step-cuts[stage])%10==0):
@@ -196,9 +218,14 @@ def main():
                 tri,bc,normal,target=correspond[i]
                 surface=(v[i,tri]*bc[:,:,None]).sum(1)
                 residual=((surface-target)*normal).sum(1)
-                loss+=frame_weight*1.4*robust(residual/.01)
+                depth_weight=1. if rows[i]['view']=='front' else a.side_depth_weight
+                loss+=frame_weight*1.4*depth_weight*robust(residual/.01)
         # Preserve B's per-coefficient expression prior when adding components.
         loss+=.002*shape.square().mean()+.002*expr.square().sum()/(n*10)+.01*jaw.square().mean()
+        if anchor_shape is not None:
+            # Finite pull back to the front anchor: side evidence can move the
+            # identity, but cannot walk it away from the frontal fit for free.
+            loss+=a.joint_shape_prior*(shape-anchor_shape).square().mean()
         if not identity_phase:
             for i,j in edges:
                 dt=rows[j]['timestamp_s']-rows[i]['timestamp_s'];factor=(.033/max(dt,.01))**2
@@ -206,16 +233,17 @@ def main():
         if not torch.isfinite(loss):raise RuntimeError('nonfinite objective')
         loss.backward()
         if identity_phase:expr.grad=None;jaw.grad=None
-        if not identity_phase or anchor is not None:shape.grad=None
+        if not identity_phase or (anchor is not None and not joint):shape.grad=None
         torch.nn.utils.clip_grad_norm_([shape,expr,jaw,rotation,trans],10.)
         # Adam otherwise moves inactive rows using momentum from the last stage.
         inactive=[i for i in good if i not in active]
         frozen_r=rotation.detach()[inactive].clone();frozen_t=trans.detach()[inactive].clone()
-        frozen_e=expr.detach()[anchored_ids].clone();frozen_j=jaw.detach()[anchored_ids].clone()
+        frozen_ids=[] if joint else anchored_ids
+        frozen_e=expr.detach()[frozen_ids].clone();frozen_j=jaw.detach()[frozen_ids].clone()
         opt.step()
         with torch.no_grad():
             rotation[inactive]=frozen_r;trans[inactive]=frozen_t
-            expr[anchored_ids]=frozen_e;jaw[anchored_ids]=frozen_j
+            expr[frozen_ids]=frozen_e;jaw[frozen_ids]=frozen_j
         with torch.no_grad():jaw.clamp_(-.7,.7);shape.clamp_(-4,4);expr.clamp_(-4,4)
         if step%20==0 or step==a.steps-1:
             record=dict(step=step,phase=phase,objective=float(loss.detach()));history.append(record);print(record,flush=True)
@@ -229,16 +257,23 @@ def main():
     mouth=raw[ri][faces[fi[ri,48:]]];lmraw=(mouth*bc[ri,48:,:,None]).sum(1)
     rv=raw[ri];mouth_vertex=(rv[:,0]>lmraw[:,0].min()-.008)&(rv[:,0]<lmraw[:,0].max()+.008)&(rv[:,1]>lmraw[:,1].min()-.008)&(rv[:,1]<lmraw[:,1].max()+.008)&(rv[:,2]>lmraw[:,2].min()-.02)
     protected=None;fixed_deviation=None
-    if anchor is not None:
+    joint_anchor_update_mm=None
+    if anchor is not None and not joint:
         for i in anchored_ids:np.testing.assert_allclose(v[i],anchor['posed_vertices'][anchor_index[rows[i]['id']]],atol=1e-7)
         fixed_deviation=anchor['deviation_m']
         anchor_refined=np.array([vv+normals(vv,faces)*fixed_deviation[:,None] for vv in v])
         for i in anchored_ids:anchor_refined[i]=anchor['refined_vertices'][anchor_index[rows[i]['id']]]
         protected=front_protected_vertices(anchor_refined,faces,data,anchored_ids)
+    elif anchor is not None:
+        # Joint: the front anchor only initialises shape, pose and expression. It
+        # no longer fixes the frontal surface or the local field, so front frames
+        # are allowed to end up somewhere else if the three views agree on it.
+        reference=anchor['posed_vertices'][[anchor_index[rows[i]['id']] for i in anchored_ids]]
+        joint_anchor_update_mm=float(np.linalg.norm(v[anchored_ids]-reference,axis=2).max()*1000)
     deviation,support,attempted,refinement_log=refine_shared(v,faces,data,identity_ids,mouth_vertex,rng,rows,protected,fixed_deviation)
     before_refined=np.array([vv+normals(vv,faces)*(fixed_deviation if fixed_deviation is not None else np.zeros(len(vv)))[:,None] for vv in v])
     locked_effective=None
-    if anchor is not None:
+    if anchor is not None and not joint:
         locked_effective={i:anchor['effective_deviation_m'][anchor_index[rows[i]['id']]] for i in anchored_ids}
     refined,effective_deviation,safety_log=safe_refinement(v,faces,deviation,protected,locked_effective)
     before_refined,_,_=safe_refinement(v,faces,fixed_deviation if fixed_deviation is not None else np.zeros(len(deviation)))
@@ -296,6 +331,11 @@ def main():
     if a.device=='cuda':torch.cuda.synchronize()
     report=dict(algorithm='C: alternating FLAME + exact first-hit triangle point-to-plane + bounded closed-only refinement',
         full_paper_reproduction=False,status='pipeline_complete_effect_unverified',device=a.device,steps=a.steps,points_per_frame=a.points,
+        shape_fusion=a.shape_fusion,side_depth_weight=a.side_depth_weight,joint_shape_prior=a.joint_shape_prior,
+        shape_identity_frozen=a.shape_fusion!='joint',
+        joint_anchor_update_mm=joint_anchor_update_mm,
+        joint_shape_delta_from_anchor=float(np.abs(shape.detach().cpu().numpy()-anchor['shape']).max()) if joint else None,
+        local_field_max_mm=float(np.abs(deviation).max()*1000),
         elapsed_s=time.perf_counter()-start,fitting_s=fit_end-start,expression_components=ne,
         identity_front_observation_weight=3.,identity_other_view_weight=1.,expression_prior_per_coefficient=.002/(n*10),
         cuda_peak_allocated_mib=torch.cuda.max_memory_allocated()/2**20 if a.device=='cuda' else 0,
@@ -313,13 +353,17 @@ def main():
             'neck open patches have independent motion; no global neck identity model','training camera poses and 2D detections are not independent truth',
             'head back, occluded ears and unseen profile remain model completion','offline batch optimisation; long-term tracking and live camera capture unverified'])
     if anchor is not None:
+        detail_reference=fixed_deviation if fixed_deviation is not None else (
+            anchor['deviation_m'] if anchor is not None else np.zeros(len(deviation)))
         report['algorithm']='C guarded: real frontal identity anchor + real oblique motion + bounded new-visibility identity detail'
         report['front_anchor']=dict(path=str(a.front_anchor),report_sha256=sha(a.front_anchor/'report.json'),
-            parameters_sha256=sha(a.front_anchor/'parameters.npz'),protected_vertices=int(protected.sum()),
-            changed_side_detail_vertices=int((np.abs(deviation-fixed_deviation)>1e-7).sum()),
-            maximum_side_detail_change_mm=float(np.abs(deviation-fixed_deviation).max()*1000),
+            parameters_sha256=sha(a.front_anchor/'parameters.npz'),protected_vertices=int(protected.sum()) if protected is not None else 0,
+            changed_side_detail_vertices=int((np.abs(deviation-detail_reference)>1e-7).sum()),
+            maximum_side_detail_change_mm=float(np.abs(deviation-detail_reference).max()*1000),
+            detail_reference='anchor deviation field' if fixed_deviation is not None else 'zero field (joint: anchor field is only an initialisation)',
             anchor_elapsed_s=anchor_report['elapsed_s'],cold_pipeline_elapsed_s=anchor_report['elapsed_s']+report['elapsed_s'],
-            policy='front base identity, pose, expression and covered triangle vertices fixed; only genuinely new side-supported vertices may refine',
+            policy=('front base identity, pose, expression and covered triangle vertices fixed; only genuinely new side-supported vertices may refine'
+                    if not joint else 'joint: front and side views share one identity and one local field; the front anchor only initialises them'),
             limitation='conservative side detail; overlapping frontal face does not receive global side shape updates')
         report['limitations'].append(report['front_anchor']['limitation'])
         report['identity_coarse_fit']='inherited shared identity from front-only anchor; no new global shape update'

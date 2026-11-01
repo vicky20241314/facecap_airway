@@ -47,7 +47,7 @@
 ```
 facecap_airway_delivery/
 ├─ README.md                    本说明
-├─ VERSION                      0.3.0
+├─ VERSION                      0.4.0
 ├─ CHANGELOG.md
 ├─ VALIDATION.md                本机实际验证记录
 ├─ docs/FAST_PATH_REPORT.md     0.3.0 加速版算法：实测、消融与剩余热点（权威）
@@ -124,7 +124,7 @@ facecap_airway_delivery/
 ### 4.4 自检
 
 ```pwsh
-.\headrgbd.cmd --version      # headrgbd 0.3.0 (facecap-inspired-v2-strict)
+.\headrgbd.cmd --version      # headrgbd 0.4.0 (facecap-inspired-v2-strict)
 .\headrgbd.cmd assets         # 7 个模型 SHA256 全部 ok
 .\headrgbd.cmd device         # 打开相机 + 载入模型
 ```
@@ -223,6 +223,23 @@ cd D:\proiect\facecap_airway_delivery
 `--fast` 不是"质量旋钮"，而是**一个明确的算法定义**：交付面取 Loop 基面，不再求解密集
 残差。被跳过的计算会在 `report.json` 里标成 `not_executed` 并写明原因，不会伪装成
 "求解成功、位移为 0"。取舍数据见 §7.2。
+
+#### 正侧面联合形状（0.4.0 起可用）
+
+```pwsh
+# 正面与侧面共同决定同一个头面部形状（推荐）
+.\headrgbd.cmd reconstruct --capture <dir> --fast --mid-rounds 1 --shape-fusion joint
+
+# 对照：形状只由正面决定（0.3.0 及以前的默认行为）
+.\headrgbd.cmd reconstruct --capture <dir> --fast --mid-rounds 1
+
+# 侧面消融：同样的自由度，但侧面深度项权重为 0
+.\headrgbd.cmd reconstruct --capture <dir> --fast --mid-rounds 1 `
+  --shape-fusion joint --side-depth-weight 0
+```
+
+`--shape-fusion` 与 `--fast` 是**两个正交维度**：前者决定形状从哪来，后者决定算到哪一步。
+默认仍是 `guarded`（只正面），要显式打开 joint。机制与实测见 §7.4。
 
 ---
 
@@ -362,6 +379,44 @@ Möller–Trumbore。实现：`head_rgbd/ray_index.py`。
 | `timing_sections` | 阶段内各分区的墙钟耗时，分区之和等于阶段总耗时 |
 
 
+### 7.4 正侧面联合形状融合（0.4.0）
+
+0.3.0 及以前，侧面观测对**共享形状**没有任何贡献，这是结构性的：`fit_c` 在侧锚模式下
+`shape.grad=None`（身份被冻结），正面帧被移出身份阶段，`identity_v2` 用硬掩码锁住正面
+覆盖的顶点，`fit_d` 的低/中频控制场只吃正面帧。实测后果是
+`changed_side_detail_vertices = 0`——侧面阶段一个顶点都没改。
+
+`--shape-fusion joint` 的改法：
+
+| 环节 | guarded | joint |
+|---|---|---|
+| FLAME 身份参数 | 冻结 | 每个闭口视角一票，共同更新 |
+| 正面前锚 | 最终值（断言顶点相等） | 只作**初始化** + 有限强度软先验（`--joint-shape-prior`，默认 0.02） |
+| 正面覆盖区域 | 硬锁（`locked`） | 连续置信度 `--joint-front-confidence`（默认 0.15），顶点仍在自由集 |
+| 低/中频控制场 | 只用正面身份帧 | 全部闭口身份帧 |
+| 张口帧 | 不参与身份 | 不参与身份（同上） |
+
+`soft_lock` 不是放宽几何约束（位移/坡度/法向/防翻面照常检查），只是把"这块区域的数据该
+信多少"从 0/1 改成连续权重，让可靠的多视角观测能够压过先验。
+
+实测（20 帧参考采集；joint+fast 249.8 s，guarded+fast 265.0 s）：
+
+- **正面硬锁顶点 2797 → 0**；局部场实际改动 1776 个顶点、最大 2.999 mm（guarded 为 0）；
+- 闭口精度相对 guarded **持平**（三视角最大 |ΔMAE| 0.040 mm，在门限内）；
+- 张口 MAE 1.737 → **1.581 mm**，覆盖率 95.74% → **98.94%**，缺失 1278 → **319**；
+- 正面下颌/轮廓 P95 9.384 → **7.756 mm**；
+- **鼻部没有改善**（三视角 0.99–1.06 mm 无差），不宣称。
+
+侧面消融（同一份代码、同自由度、`--side-depth-weight 0`）证明侧面数据是必要的：去掉后
+侧面嘴唇恶化 0.7–1.0 mm、下颌轮廓恶化 0.65–0.84 mm。完整数据见
+`docs/JOINT_FUSION_REPORT.md`。
+
+注意：联合模式下正面帧的姿态/表情也自由，`joint_anchor_update_mm` 可达 9–11 mm，**不能**
+当作形状改动；判断纯身份变化要看 `joint_shape_delta_from_anchor`。
+
+> `tools/import_multiview_capture.py` 可把 `airway3d.rgbd.multiview.v1` 采集转成本流程的
+> capture 目录（每个视角取 1 张参考帧）。
+
 ---
 
 ## 8. 常见失败与恢复
@@ -439,12 +494,16 @@ OSQP 迭代）。要再压缩需要改 QP 的缩放/条件数，本轮未做，�
 
 ## 10. 版本
 
-`0.3.0`。`VERSION`、`--version`、`README`、`manifest.json` 四处一致。
-历史见 `CHANGELOG.md`：本次变化是**射线求交实现替换 + 可选快速流程**，完整重建从
-32 分钟降到 5 分钟以内。这不是纯性能发布：射线实现与 rtree 一致到 0.15 µm，但流水线
-在重心阈值 `bc > .05` 与 QP active set 处对 1e-7 扰动敏感，因此**交付网格与 0.2.0
-不是逐位一致**，0.2.0 的验收结论不能直接沿用；本版本的质量对比基准是"同代码、不加
-快速开关"的同机运行，见 `CHANGELOG.md` 的 0.3.0 段。
+`0.4.0`。`VERSION`、`--version`、`README`、`manifest.json` 四处一致。
+
+本版本新增**正侧面联合形状融合**（`--shape-fusion joint`）：正面、左侧、右侧观测共同决定
+同一个 FLAME 身份与局部修正场，替代"冻结身份 + 硬锁正面"的旧规则。默认仍为 `guarded`，
+需要显式开启。**算法名未变**（`facecap-inspired-v2-strict`），变的是形状证据的用法。
+
+0.3.0 是性能版本（射线内核替换 + 快速流程，32 分钟 → 5 分钟以内），并已知交付网格与
+0.2.0 不是逐位一致——流水线在重心阈值 `bc > .05` 与 QP active set 处对 1e-7 量级扰动
+敏感，0.2.0 的验收结论不沿用。两版的质量对比基准都是"同代码、同输入、同口径"的同机
+运行，见 `CHANGELOG.md` 对应段落。
 
 > 0.2.0 发布时默认只导出闭口网格；同版本的后续修订按要求改为**闭口 + 张口各一份**，
 > 版本号不变、不新增研究模式，算法与参数完全未改。

@@ -208,10 +208,15 @@ def safety(base, directions, faces, candidate, edges, lengths_mm, settings):
 
 
 def solve_field(base, faces, directions, data, rows, identity_ids, excluded, settings,
-                *, initial=None, locked=None, stage='regularized',reference_base=None,proxy_field=None):
+                *, initial=None, locked=None, soft_lock=None, stage='regularized',reference_base=None,proxy_field=None):
     count = base.shape[1]
     field = np.zeros(count) if initial is None else initial.copy()
     locked = np.zeros(count, bool) if locked is None else locked
+    # Continuous confidence instead of a hard lock: 1.0 is fully trusted, small
+    # values let a vertex move only when several views agree strongly enough to
+    # outweigh the prior. Downweighting keeps the vertex in the free set, so the
+    # solver can still satisfy the geometric constraints there.
+    soft_lock = np.ones(count) if soft_lock is None else soft_lock
     regularizer, edges, lengths, areas, mass = physical_regularizers(base[0] if reference_base is None else reference_base[0], faces, settings)
     regularizer_bias=np.zeros(regularizer.shape[0])
     if settings.research_v2:
@@ -305,6 +310,8 @@ def solve_field(base, faces, directions, data, rows, identity_ids, excluded, set
             w = area_quadrature(fi, areas)
             w *= normalized_frame_weights[i]
             w *= corr['incidence'][keep]**2
+            # An equation inherits the confidence of the vertices it touches.
+            w *= soft_lock[ids].mean(1)
             sensitivity=value.sum(1)
             if settings.research_v2:
                 from head_rgbd.surface_v2 import canonical_targets

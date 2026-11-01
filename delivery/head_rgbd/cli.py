@@ -90,6 +90,26 @@ def _add_fit_options(parser: argparse.ArgumentParser, defaults: dict) -> None:
         help="mid-frequency correction rounds used by the fast path",
     )
     parser.add_argument(
+        "--shape-fusion",
+        choices=("guarded", "joint"),
+        default=reconstruction.get("shape_fusion", "guarded"),
+        help="joint: front and side views jointly determine one shared face shape; "
+             "guarded: the reproducible front-anchored control",
+    )
+    parser.add_argument(
+        "--joint-front-confidence",
+        type=float,
+        default=reconstruction.get("joint_front_confidence", 0.15),
+        help="joint mode: data weight kept by a front-covered vertex instead of a hard lock",
+    )
+    parser.add_argument(
+        "--side-depth-weight",
+        type=float,
+        default=reconstruction.get("side_depth_weight", 1.0),
+        help="joint mode: side-view depth term weight relative to a front view "
+             "(set 0 for the side-ablation control)",
+    )
+    parser.add_argument(
         "--landmark-device",
         choices=("cpu", "cuda", "auto"),
         default="cpu",

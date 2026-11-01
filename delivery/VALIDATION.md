@@ -94,3 +94,36 @@ runtime\env\python.exe -m pytest tests -q
 - 因此**交付网格与 0.2.0 不是逐位一致**；以 0.2.0 为基准的全脸 MAE 读数为 +0.39 mm，
   而“只换射线、不跳过任何阶段”的同机运行也是 +0.39 mm。
 - 结论：**§1–§5 的 0.2.0 验收结论不能直接沿用到 0.3.0**，需要用同机同代码的对照重新验收。
+
+## 8. 0.4.0（正侧面联合形状融合）本轮验证
+
+新增能力：`--shape-fusion joint`。默认仍是 `guarded`，所以 0.3.0 的行为可原样复现。
+
+| 检查 | 命令 | 结果 |
+|---|---|---|
+| 版本一致性 | `python -m head_rgbd --version` | `headrgbd 0.4.0 (facecap-inspired-v2-strict)`，退出码 0 |
+| 测试 | `pytest tests -q`（本目录，使用项目运行时） | **25 passed, 1 skipped**；跳过项仍是 `runtime environment is not installed` |
+| 联合重建（20 帧参考采集） | `reconstruct --capture <参考采集> --fast --mid-rounds 1 --shape-fusion joint` | **249.8 s**，status=passed |
+| guarded 对照（同一采集、同一代码） | 同上去掉 `--shape-fusion joint` | **265.0 s**，status=passed |
+| 侧面消融 | 同上加 `--side-depth-weight 0` | **301.8 s**，status=passed |
+| 联合重建（airway3d 四视角采集） | 先 `tools/import_multiview_capture.py` 转换，再同上 | **118.3 s**，status=passed，闭口/张口各一份 |
+| 交付网格 | 上述各运行的 `delivery/` | 20018 顶点 / 39904 面，顶点有限、索引合法、米级包围盒、两面表相同 |
+| 交付继承联合结果 | 交付 OBJ vs `parameters.npz:dense_vertices[row]` | 最大差 0.000005 mm（OBJ 文本精度） |
+| 机制生效 | `reconstruction/guarded/report.json` | 正面硬锁顶点 2797 → **0**；局部场改变顶点 0 → **1776**，最大 0 → **2.999 mm** |
+
+### 质量（同帧、每帧 6000 点、|残差| ≤ 30 mm，`tools/eval_multiview.py`）
+
+| 视角 | 状态 | 划分 | guarded MAE | joint MAE | Δ |
+|---|---|---|---|---|---|
+| 正面 | closed | 留出 | 1.352 | 1.345 | −0.007 |
+| 正面 | closed | 训练 | 1.328 | 1.368 | +0.040 |
+| 左 | closed | 留出 | 1.207 | 1.246 | +0.039 |
+| 左 | closed | 训练 | 1.179 | 1.167 | −0.012 |
+| 右 | closed | 留出 | 1.168 | 1.165 | −0.003 |
+| 右 | closed | 训练 | 1.101 | 1.119 | +0.018 |
+| 正面 | open | — | 1.737 | 1.581 | **−0.156** |
+
+外观损失：闭口持平（最大 +0.040 mm，门限 0.05 mm 内），张口与覆盖率明显改善。侧面消融
+（无侧面深度）会让侧面嘴唇恶化 0.7–1.0 mm、下颌轮廓恶化 0.65–0.84 mm，说明侧面数据是
+必要的；但 **joint 在闭口精度上没有超过 guarded**，鼻部也无改善——见
+`docs/JOINT_FUSION_REPORT.md` 与 `CHANGELOG.md` 的 0.4.0 段。`§6 未验证项` 仍然成立。

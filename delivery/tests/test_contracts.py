@@ -36,7 +36,7 @@ from head_rgbd.paths import PROJECT_ROOT, asset_paths, resolve_runtime_dir, veri
 from head_rgbd.reference_contract import inner_lip_gap_mm, observed_landmarks_m
 
 
-EXPECTED_VERSION = "0.3.0"
+EXPECTED_VERSION = "0.4.0"
 
 
 class VersionContract(unittest.TestCase):
