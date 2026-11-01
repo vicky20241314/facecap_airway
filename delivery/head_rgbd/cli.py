@@ -78,6 +78,18 @@ def _add_fit_options(parser: argparse.ArgumentParser, defaults: dict) -> None:
         default=reconstruction.get("dense_points", 5000),
     )
     parser.add_argument(
+        "--fast",
+        action="store_true",
+        default=reconstruction.get("fast", False),
+        help="fast path: deliver the Loop base without a dense residual solve",
+    )
+    parser.add_argument(
+        "--mid-rounds",
+        type=int,
+        default=reconstruction.get("mid_rounds", 2),
+        help="mid-frequency correction rounds used by the fast path",
+    )
+    parser.add_argument(
         "--landmark-device",
         choices=("cpu", "cuda", "auto"),
         default="cpu",

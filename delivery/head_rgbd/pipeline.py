@@ -257,6 +257,8 @@ def reconstruct_locked(
                 "--research-v2",
                 "--points",
                 str(args.dense_points),
+                *(["--fast"] if getattr(args, "fast", False) else []),
+                *(["--mid-rounds", str(args.mid_rounds)] if getattr(args, "fast", False) else []),
             ],
         ),
     )

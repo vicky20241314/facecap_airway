@@ -6,8 +6,10 @@ field is solved per topology. Subdivision never resets its +/-3 mm budget.
 from __future__ import annotations
 
 from dataclasses import dataclass, asdict
+import time
 import cv2
 import numpy as np
+import trimesh
 from scipy import sparse
 from scipy.optimize import lsq_linear
 from scipy.sparse.linalg import lsmr
@@ -32,12 +34,18 @@ class Settings:
     dense_prior_strength: float = 2.0
     research_v2: bool = False
     fixed_ray_policy: str = 'strict-coverage'
+    # Rounds of the mid-frequency correction used by the fast path. It is a
+    # separate budget because each round solves a tall QP whose cost dwarfs the
+    # surface it moves.
+    mid_rounds: int = 2
 
     def __post_init__(self):
         if self.fixed_ray_policy not in ('strict-coverage','accounted-research'):
             raise ValueError('unknown fixed-ray policy')
         if self.fixed_ray_policy!='strict-coverage' and not self.research_v2:
             raise ValueError('accounted ray policy is an explicit v2 research option')
+        if self.mid_rounds < 0:
+            raise ValueError('mid-frequency round budget must not be negative')
 
 
 def fixed_ray_energy(depth_error_mm,covered,policy):
@@ -231,11 +239,13 @@ def solve_field(base, faces, directions, data, rows, identity_ids, excluded, set
             if c is not None:
                 keep=~excluded[faces[c['face']]].any(1)&plane_data[i][2][c['ray']]
                 diagnostic_rays[i]=np.unique(c['ray'][keep])
-    def fixed_diagnostic(candidate):
+    def fixed_diagnostic(candidate, timing=None):
+        # Fixed-ray scoring uses its own loose gate (.030/None) and must not reuse
+        # the correspondence result of the tight gate (.008/.005).
         posed=surface_state(base,directions,candidate);scores=[];counts=[];missing=0
         for i,required in diagnostic_rays.items():
             if not len(required):continue
-            c,_=ray_surface(posed[i],faces,points[i][required],.030,None)
+            c,_=ray_surface(posed[i],faces,points[i][required],.030,None,timing=timing)
             residual=np.full(len(required),8.)
             covered=np.zeros(len(required),bool)
             if c is not None:
@@ -254,14 +264,23 @@ def solve_field(base, faces, directions, data, rows, identity_ids, excluded, set
         normalized_frame_weights={i:(3. if rows[i]['view']=='front' else 1.)/frame_weight_sum for i in identity_ids}
     qp_constraints = None
     qp_active = None
+    stopped_reason = None
     for outer in range(settings.outer_steps):
+        # Per-outer breakdown of the measured cost. One flat dict per outer record;
+        # no monitoring framework. Ray build/query split comes from ray_surface.
+        timing = dict(correspondences_s=0., system_build_s=0., qp_setup_s=0.,
+                      qp_solve_s=0., line_search_s=0., geometry_check_s=0.,
+                      fixed_ray_s=0., correspondences_ray_build_s=0.,
+                      correspondences_ray_query_s=0., correspondences_ray_calls=0)
+        clock = time.perf_counter()
         posed = surface_state(base, directions, field)
         matrices, targets, weights, face_medians = [], [], [], []
         support = np.zeros_like(support_union)
         accepted = []
         blocks = []
         for k, i in enumerate(identity_ids):
-            corr, stats = ray_surface(posed[i], faces, points[i], .008, .005)
+            corr, stats = ray_surface(posed[i], faces, points[i], .008, .005,
+                                      timing=timing)
             accepted.append(dict(frame_index=int(i), **stats))
             if corr is None:
                 continue
@@ -321,16 +340,29 @@ def solve_field(base, faces, directions, data, rows, identity_ids, excluded, set
         support_union |= support
         free_mask = (support.sum(0) >= 2)&~excluded&~locked
         free = np.flatnonzero(free_mask)
+        timing['correspondences_s'] = max(time.perf_counter()-clock, 0.)
         if not len(free):
-            history.append(dict(stage=stage, outer=outer, free_vertices=0, accepted=accepted))
+            # An empty free set is a legitimate no-op, not a failure: no system is
+            # assembled, no constraints are built, no solver runs, and the field is
+            # returned unchanged. The record stays in the history so a no-op can
+            # never be mistaken for a stage that did not run.
+            history.append(dict(stage=stage, outer=outer, free_vertices=0,
+                                status='skipped_no_free_vertices',
+                                reason='no vertex has two independent supported observations outside the excluded and locked sets',
+                                step_accepted=False, accepted=accepted,
+                                actual_update_mm=0., timing=timing))
+            stopped_reason = 'skipped_no_free_vertices'
             break
+        clock = time.perf_counter()
         fixed = field.copy(); fixed[free] = 0
         rw = np.sqrt(w/np.maximum(1., np.abs(A@field-b)/2.))
         system = sparse.vstack((A[:, free].multiply(rw[:, None]), regularizer[:, free])).tocsr()
         target = np.r_[(b-A@fixed)*rw, -(regularizer@fixed+regularizer_bias)]
+        timing['system_build_s'] = max(time.perf_counter()-clock, 0.)
         if settings.solver == 'qp':
             from head_rgbd.qp_d import constraints
             from head_rgbd.qp_d import solve
+            clock = time.perf_counter()
             if qp_active is None or not np.array_equal(qp_active, free_mask):
                 if reference_base is None:
                     qp_constraints=constraints(base,directions,faces,edges,lengths,settings,free_mask)
@@ -338,7 +370,10 @@ def solve_field(base, faces, directions, data, rows, identity_ids, excluded, set
                     from head_rgbd.hierarchy_d import constraints as affine_constraints
                     qp_constraints=affine_constraints(base,reference_base,directions,faces,edges,lengths,proxy_field,settings,free_mask)
                 qp_active=free_mask.copy()
+            timing['qp_setup_s'] = max(time.perf_counter()-clock, 0.)
+            clock = time.perf_counter()
             solution, solver_info = solve(system, target, free, fixed, field, *qp_constraints)
+            timing['qp_solve_s'] = max(time.perf_counter()-clock, 0.)
             solver_status = solver_info['status']
             optimality = solver_info['dual_residual']
         else:
@@ -354,18 +389,26 @@ def solve_field(base, faces, directions, data, rows, identity_ids, excluded, set
         previous_objective = float(np.linalg.norm((A@field-b)*rw)**2+np.linalg.norm(regularizer@field+regularizer_bias)**2)
         found = False
         check = {}
+        field_before_step = field
+        line_search_started = time.perf_counter()
+        fixed_ray_started = time.perf_counter()
         diagnostic_before,missing_before=fixed_diagnostic(field) if settings.research_v2 else (0.,0)
+        timing['fixed_ray_s'] += max(time.perf_counter()-fixed_ray_started, 0.)
         diagnostic_after,missing_after=diagnostic_before,missing_before
         trials=[]
         for _ in range(18):
             candidate = field+alpha*(proposed-field)
+            geometry_started = time.perf_counter()
             valid, check = check_field(candidate)
+            timing['geometry_check_s'] += max(time.perf_counter()-geometry_started, 0.)
             geometric_valid=valid
             diagnostic_evaluated=False
             objective = float(np.linalg.norm((A@candidate-b)*rw)**2+np.linalg.norm(regularizer@candidate+regularizer_bias)**2)
             reason=check.get('reason') if not valid else ('linear_objective' if objective>previous_objective+1e-12 else None)
             if valid and objective <= previous_objective+1e-12 and settings.research_v2:
+                fixed_ray_started = time.perf_counter()
                 diagnostic_after,missing_after=fixed_diagnostic(candidate)
+                timing['fixed_ray_s'] += max(time.perf_counter()-fixed_ray_started, 0.)
                 diagnostic_evaluated=True
                 if settings.fixed_ray_policy=='accounted-research':
                     valid=diagnostic_after<=diagnostic_before+1e-10
@@ -380,10 +423,16 @@ def solve_field(base, faces, directions, data, rows, identity_ids, excluded, set
             if valid and objective <= previous_objective+1e-12:
                 field = candidate; found = True; break
             alpha *= .5
+        timing['line_search_s'] = max(time.perf_counter()-line_search_started, 0.)
+        # Real deformation of this outer step: the largest change of the accepted
+        # field relative to the field the update started from. It is deliberately
+        # not the step scale: a tiny alpha can still be the only admissible step.
+        actual_update_mm = float(np.abs(field-field_before_step).max())
         record = dict(stage=stage, outer=outer, free_vertices=len(free), solver_status=solver_status,
                       solver=solver_info, optimality=optimality, step_accepted=found, shared_step_scale=alpha,
                       accepted=accepted, safety=check, objective_before=previous_objective,
-                      objective_after=objective, noise_median_mm=float(np.median(noise)))
+                      objective_after=objective, noise_median_mm=float(np.median(noise)),
+                      actual_update_mm=actual_update_mm, timing=timing)
         record['cross_frame_statistic']='canonical_identity_scalar_mm' if settings.research_v2 else 'camera_plane_target_mm'
         record['regularizer']='FEM total vector curvature change plus scalar gradient' if settings.research_v2 else 'finite_volume_scalar'
         if settings.research_v2:
@@ -394,11 +443,25 @@ def solve_field(base, faces, directions, data, rows, identity_ids, excluded, set
                 aggregation='uniform over every original fixed ray' if settings.fixed_ray_policy=='accounted-research' else 'equal weight per frame MSE',
                 allowance='penalized MSE must not increase; every original ray including missing hits retained; coverage independently evaluated' if settings.fixed_ray_policy=='accounted-research' else 'at most 2 percent MSE plus 0.002 mm2 per accepted step; all original diagnostic rays retained')
         history.append(record)
-        print(f'{stage} outer={outer} free={len(free)} alpha={alpha:.5f} accepted={found}', flush=True)
+        print(f'{stage} outer={outer} free={len(free)} alpha={alpha:.5f} accepted={found} update={actual_update_mm:.4f}mm', flush=True)
+        # Stop only when both independent quantities agree that the accepted step
+        # bought nothing: the surface moved less than one depth-quantisation step
+        # (settings.noise_floor_mm) AND the fixed-ray MSE improved by less than
+        # 0.01%. Both numbers are already reported for this outer step. A small
+        # alpha is NOT part of the rule: a small shared step can be the only one
+        # that survives the fixed-ray coverage check.
+        if actual_update_mm < settings.noise_floor_mm and diagnostic_after >= diagnostic_before*(1.-1e-4):
+            record['stopped'] = True
+            record['stop_reason'] = 'actual_update_below_noise_and_mse_flat'
+            stopped_reason = 'actual_update_below_noise_and_mse_flat'
+            print(f'{stage} outer={outer} stopped: update={actual_update_mm:.6f}mm '
+                  f'fixed_ray_mse={diagnostic_before:.6f}->{diagnostic_after:.6f}', flush=True)
+            break
     valid, check = check_field(field)
     if not valid:
         raise ValueError(f'final shared geometry violates safety: {check}')
     return field, support_union, dict(settings=asdict(settings), sampling=sampling, history=history, final_safety=check,
+                                     stop_reason=stopped_reason,
                                      maximum_absolute_displacement_mm=float(np.abs(field).max()))
 
 

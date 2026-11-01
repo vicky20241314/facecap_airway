@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import argparse
-from dataclasses import replace
+from dataclasses import replace, asdict
 import json
 from pathlib import Path
 import time
@@ -26,8 +26,15 @@ def load_npz(path):
         return {key: z[key] for key in z.files}
 
 
-def reconstruct(sequence, initial_fit, output, settings, mode,dense_mode='absolute',regularized_fit=None):
+def reconstruct(sequence, initial_fit, output, settings, mode,dense_mode='absolute',regularized_fit=None,fast=False):
     started = time.perf_counter()
+    # Coarse wall-clock marks for the blocks that run OUTSIDE solve_field. The
+    # per-outer accounting inside solve_field cannot see subdivision, Loop base
+    # search, evidence requery, neck tracking and exports, which together were an
+    # unexplained third of the stage. Deltas, not absolutes, are reported.
+    marks = []
+    def mark(name):
+        marks.append((name, time.perf_counter() - started))
     output.mkdir(parents=True, exist_ok=False)
     source = json.loads((initial_fit/'report.json').read_text(encoding='utf-8'))
     if mode=='guarded' and not source.get('front_anchor'):
@@ -84,10 +91,18 @@ def reconstruct(sequence, initial_fit, output, settings, mode,dense_mode='absolu
                                            excluded, low_settings, stage='front_anchor_low_frequency' if settings.research_v2 else 'front_anchor_regularized')
         if settings.research_v2:
             low_anchor=anchor.copy()
+            # The third mid-frequency round moved the surface 0.041 mm and bought
+            # 1.14% of fixed-ray MSE for the cost of a full tall QP, so the fast
+            # path stops after two rounds. Both rounds are kept: they carry real
+            # updates (0.185 mm, 0.171 mm) and initialise the guarded solve.
+            mid_settings=replace(settings,displacement_bound_mm=2.5,
+                                 outer_steps=settings.mid_rounds if fast else settings.outer_steps)
             anchor,_,mid_log=solve_field(base,faces,direction,data,rows,front_identity,excluded,
-                replace(settings,displacement_bound_mm=2.5),initial=anchor,stage='front_anchor_mid_frequency')
+                mid_settings,initial=anchor,stage='front_anchor_mid_frequency')
+            mid_log['fast_path_rounds']=mid_settings.outer_steps
             anchor_log['mid_frequency']=mid_log
     regular_anchor_vertices = surface_state(base, direction, anchor)
+    mark('front_anchor_low_and_mid')
     if regularized_fit is None and mode=='guarded':
         protected = front_protected_vertices(regular_anchor_vertices, faces, data, front)
         regularized, support_regular, regular_log = solve_field(
@@ -99,6 +114,7 @@ def reconstruct(sequence, initial_fit, output, settings, mode,dense_mode='absolu
             base, faces, direction, data, rows, identity, excluded, replace(settings,displacement_bound_mm=2.5) if settings.research_v2 else settings,
             initial=anchor, stage='joint_closed_regularized_research')
     regular_vertices = surface_state(base, direction, regularized)
+    mark('guarded_regularized')
     dense_faces, mapping, midpoint_edges, parent_faces = subdivide(faces, base.shape[1])
     dense_base = np.array([mapping@v for v in base])
     dense_direction = np.array([mapping@n for n in direction])
@@ -145,29 +161,56 @@ def reconstruct(sequence, initial_fit, output, settings, mode,dense_mode='absolu
             base_is_not_a_scan=True,limit_surface=False,
             budget_reference='exact linear prolongation of ORIGINAL FLAME coarse, not the smoothed base')
     # Fresh equations on the dense topology; the residual has its own trust bound.
-    dense_anchor, _, dense_anchor_log = solve_field(
-        dense_fit_base, dense_faces, dense_direction, data, rows, front_identity, dense_excluded,
-        dense_settings, locked=dense_locked,stage='front_anchor_dense',**options)
-    dense_anchor_vertices = surface_state(dense_fit_base, dense_direction, dense_anchor)
-    if mode=='guarded':
-        dense_protected = front_protected_vertices(dense_anchor_vertices, dense_faces, data, front)
-        dense, support_dense, dense_log = solve_field(
-            dense_fit_base, dense_faces, dense_direction, data, rows, identity, dense_excluded,
-            dense_settings, initial=dense_anchor, locked=dense_protected|dense_locked, stage='guarded_dense',**options)
+    mark('subdivide_and_loop_base')
+    if fast:
+        # Explicit algorithm definition for the fast path: the delivered surface is
+        # the budgeted Loop base grown from the guarded low/mid control field. No
+        # dense residual is solved, so none is reported. On the reference capture
+        # the skipped solve moved the surface by 0.002 mm in total; that is a
+        # property of this capture, not a claim that the residual is always empty.
+        dense_anchor = np.zeros(dense_fit_base.shape[1])
+        dense_vertices = dense_fit_base
+        dense_anchor_vertices = dense_fit_base
+        support_dense = (mapping @ support_regular.T.astype(float)).T > .5
+        dense_protected = front_protected_vertices(dense_vertices, dense_faces, data, front)
+        dense_anchor_log = dict(stage='front_anchor_dense', status='not_executed',
+                                reason='fast path delivers the Loop base; no dense residual is solved',
+                                settings=asdict(dense_settings), history=[], stop_reason='not_executed')
+        dense_log = dict(stage='guarded_dense', status='not_executed',
+                         reason='fast path delivers the Loop base; no dense residual is solved',
+                         settings=asdict(dense_settings), history=[], stop_reason='not_executed')
+        dense = np.zeros(dense_fit_base.shape[1])
+        mark('dense_front_anchor')
+        mark('guarded_dense')
     else:
-        dense_protected = np.zeros(dense_base.shape[1], bool)
-        dense, support_dense, dense_log = solve_field(
-            dense_fit_base, dense_faces, dense_direction, data, rows, identity, dense_excluded,
-            dense_settings, initial=dense_anchor,locked=dense_locked, stage='joint_closed_dense_research',**options)
-    dense_vertices = surface_state(dense_fit_base, dense_direction, dense)
+        dense_anchor, _, dense_anchor_log = solve_field(
+            dense_fit_base, dense_faces, dense_direction, data, rows, front_identity, dense_excluded,
+            dense_settings, locked=dense_locked,stage='front_anchor_dense',**options)
+        dense_anchor_vertices = surface_state(dense_fit_base, dense_direction, dense_anchor)
+        mark('dense_front_anchor')
+        if mode=='guarded':
+            dense_protected = front_protected_vertices(dense_anchor_vertices, dense_faces, data, front)
+            dense, support_dense, dense_log = solve_field(
+                dense_fit_base, dense_faces, dense_direction, data, rows, identity, dense_excluded,
+                dense_settings, initial=dense_anchor, locked=dense_protected|dense_locked, stage='guarded_dense',**options)
+        else:
+            dense_protected = np.zeros(dense_base.shape[1], bool)
+            dense, support_dense, dense_log = solve_field(
+                dense_fit_base, dense_faces, dense_direction, data, rows, identity, dense_excluded,
+                dense_settings, initial=dense_anchor,locked=dense_locked, stage='joint_closed_dense_research',**options)
+        dense_vertices = surface_state(dense_fit_base, dense_direction, dense)
+        mark('guarded_dense')
     if settings.research_v2:
         from head_rgbd.surface_v2 import reliable_evidence
-        evidence_regular,evidence_log_regular=reliable_evidence(regular_vertices,faces,data,rows)
+        # The regularized evidence only colours an intermediate support preview and
+        # fills the reuse sidecar; no optimisation or delivery step reads it.
+        evidence_regular,evidence_log_regular=(None,None) if fast else reliable_evidence(regular_vertices,faces,data,rows)
         evidence_dense,evidence_log_dense=reliable_evidence(dense_vertices,dense_faces,data,rows)
     else:
         evidence_regular, evidence_log_regular = evidence(regular_vertices, faces, data)
         evidence_dense, evidence_log_dense = evidence(dense_vertices, dense_faces, data)
-    np.savez_compressed(output/'support_regularized.npz', **evidence_regular,
+    mark('evidence')
+    np.savez_compressed(output/'support_regularized.npz', **({} if evidence_regular is None else dict(evidence_regular)),
                         refinement_frame_mask=support_regular, refinement_frame_indices=identity,
                         excluded_identity_vertices=excluded, deviation_m=regularized*.001)
     np.savez_compressed(output/'support_dense.npz', **evidence_dense,
@@ -217,12 +260,15 @@ def reconstruct(sequence, initial_fit, output, settings, mode,dense_mode='absolu
                 inner_lip_gap_mm=float(np.linalg.norm(landmarks[62]-landmarks[66])*1000))
             if stage in ('regularized', 'dense'):
                 ev = evidence_regular if stage=='regularized' else evidence_dense
-                palette = np.array([[120, 120, 125, 255], [230, 175, 55, 255], [55, 175, 215, 255]], np.uint8)
-                trimesh.Trimesh(vertices[i], topology, vertex_colors=palette[ev['region_label']], process=False).export(output/f'{state}_{stage}_support_m.ply')
+                if ev is not None:
+                    palette = np.array([[120, 120, 125, 255], [230, 175, 55, 255], [55, 175, 215, 255]], np.uint8)
+                    trimesh.Trimesh(vertices[i], topology, vertex_colors=palette[ev['region_label']], process=False).export(output/f'{state}_{stage}_support_m.ply')
         references[state] = reference
+    mark('references_and_exports')
     write_json(output/'reference_geometry.json', dict(schema='head_rgbd.d.reference.v1', references=references,
         landmark_indices='FLAME dynamic contour + static 68; zero based; per-stage triangle mapping'))
     neck = neck_surfaces(rows, data, output)
+    mark('neck')
     np.savez_compressed(output/'parameters.npz', shape=params['shape'], expression=params['expression'], jaw=params['jaw'],
         R=params['R'], t=params['t'], posed_vertices=base, faces=faces, regularized_vertices=regular_vertices,
         dense_base_vertices=dense_base, dense_vertices=dense_vertices, dense_faces=dense_faces,
@@ -235,11 +281,22 @@ def reconstruct(sequence, initial_fit, output, settings, mode,dense_mode='absolu
         front_protected_vertices=protected, dense_front_protected_vertices=dense_protected,
         mouth_identity_excluded=params['mouth_identity_excluded'], anatomical_excluded=excluded,
         dense_anatomical_excluded=dense_excluded, identity_selected=identity)
+    marks.append(('parameters_save', time.perf_counter() - started))
+    # Deltas between consecutive marks partition the whole stage exactly once.
+    timing_sections = []
+    previous = 0.
+    for name, at in marks:
+        timing_sections.append(dict(section=name, elapsed_s=round(at - previous, 3)))
+        previous = at
     logs = dict(front_anchor_regularized=anchor_log, regularized=regular_log,
                 front_anchor_dense=dense_anchor_log, dense=dense_log)
     write_json(output/'report.json', dict(schema='head_rgbd.d.fit.v1', project_version=__version__,
         algorithm='v2 research: alternating fixed-identity motion initialization, FEM total deformation and budgeted measured Loop surface' if settings.research_v2 else 'D research: measured shared normal field, area quadrature and physical regularization',
         mode=mode,dense_mode=dense_mode,research_v2=settings.research_v2,loop_base=loop_log,research_only=True, full_facecap_reproduction=False,
+        fast_path=dict(enabled=fast,
+            dense_residual='not_executed; delivered surface is the Loop base' if fast else 'executed',
+            mid_frequency_rounds=(anchor_log.get('mid_frequency') or {}).get('fast_path_rounds', settings.outer_steps),
+            regularized_evidence='not_computed' if evidence_regular is None else 'computed'),
         dense_scalar_representation='shared measured residual over budgeted Loop regularized control surface' if dense_mode=='loop-research' else ('residual over exact interpolated regularized control surface' if dense_mode=='hierarchical' else 'absolute normal scalar over FLAME base'),
         regularized_reuse=dict(path=str(regularized_fit),sha256=sha(regularized_fit/'parameters.npz')) if regularized_fit else None,
         sequence_sha256=sha(sequence), initialization=str(initial_fit), initialization_sha256=sha(initial_fit/'parameters.npz'),
@@ -256,6 +313,7 @@ def reconstruct(sequence, initial_fit, output, settings, mode,dense_mode='absolu
         field_logs=logs, evidence_logs=dict(regularized=evidence_log_regular, dense=evidence_log_dense), neck=neck,
         compute_device='cpu', cuda_peak_allocated_mib=0., cuda_metric_scope='D uses CPU; initialization GPU statistics are in its own report',
         elapsed_s=time.perf_counter()-started, timing_scope='D CPU correspondences, two topologies, evidence, independent neck and exports',
+        timing_sections=timing_sections,
         source_hashes={name:sha(Path(__file__).parent/name) for name in ('geometry_d.py','fit_d.py','qp_d.py','normal_cone_d.py','hierarchy_d.py')},
         statuses=dict(implementation='implemented', pipeline='passed', geometry_quality='not_evaluated', independent_accuracy='unverified'),
         limitations=['research candidate, not a replacement of default C guarded',
@@ -285,14 +343,19 @@ def main():
     parser.add_argument('--dense-residual-bound-mm',type=float,default=.5)
     parser.add_argument('--gradient-length-mm', type=float, default=3.)
     parser.add_argument('--bending-length-mm', type=float, default=4.)
+    parser.add_argument('--fast', action='store_true',
+                        help='deliver the Loop base without a dense residual solve and stop mid-frequency after --mid-rounds')
+    parser.add_argument('--mid-rounds', type=int, default=2,
+                        help='mid-frequency correction rounds on the fast path')
     args = parser.parse_args()
     if args.points < 500 or min(args.gradient_length_mm, args.bending_length_mm,args.dense_residual_bound_mm) <= 0 or args.dense_residual_bound_mm> .5:
         parser.error('invalid sampling/physical regularization')
     configure_environment(args.runtime)
     reconstruct(args.sequence.resolve(), args.initial_fit.resolve(), args.output.resolve(),
                 Settings(solver=args.solver, points=args.points, research_v2=args.research_v2,fixed_ray_policy=args.fixed_ray_policy,noise_floor_mm=1/np.sqrt(12) if args.research_v2 else .7,gradient_length_mm=args.gradient_length_mm,
-                         bending_length_mm=args.bending_length_mm,dense_residual_bound_mm=args.dense_residual_bound_mm), args.mode,
-                args.dense_mode,args.regularized_fit.resolve() if args.regularized_fit else None)
+                         bending_length_mm=args.bending_length_mm,dense_residual_bound_mm=args.dense_residual_bound_mm,
+                         mid_rounds=args.mid_rounds), args.mode,
+                args.dense_mode,args.regularized_fit.resolve() if args.regularized_fit else None, args.fast)
 
 
 if __name__=='__main__':

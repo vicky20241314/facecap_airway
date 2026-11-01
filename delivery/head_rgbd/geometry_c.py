@@ -3,7 +3,7 @@
 All distances are metres in X-right/Y-up/Z-backward camera coordinates.
 No nearest-vertex correspondence or interpolated depth is used here.
 """
-import gc
+import time
 import cv2
 import numpy as np
 from scipy import sparse
@@ -11,6 +11,7 @@ from scipy.optimize import lsq_linear
 from scipy.ndimage import minimum_filter, maximum_filter, binary_erosion
 import trimesh
 
+from head_rgbd.ray_index import RayIndex
 from head_rgbd.contracts import temporal_edge_allowed
 from head_rgbd.fit_b import normals
 from head_rgbd.prepare import backproject
@@ -45,31 +46,26 @@ def sample_depth(d, count, rng, exclude_mouth=False, stride=None):
     return pts[ok], uv[ok], dict(valid_pixels=int(valid.sum()), sampled=int(ok.sum()))
 
 
-def first_hits(mesh,points,chunk=32):
-    """Bound transient rtree intersection arrays; retain original ray numbering."""
-    hits=[];rays=[];faces=[]
-    for start in range(0,len(points),chunk):
-        block=points[start:start+chunk]
-        h,r,f=mesh.ray.intersects_location(np.zeros_like(block),block,multiple_hits=False)
-        hits.append(h);rays.append(r+start);faces.append(f)
-    if not hits:return np.empty((0,3)),np.empty(0,int),np.empty(0,int)
-    return np.concatenate(hits),np.concatenate(rays),np.concatenate(faces)
-
-
-def ray_surface(v, f, points, max_depth=.025, max_plane=None):
-    """Exact first-hit triangle query for each real observation ray (rtree).
+def ray_surface(v, f, points, max_depth=.025, max_plane=None, timing=None):
+    """Exact first-hit triangle query for each real observation ray.
 
     Occluded triangles cannot receive a correspondence. The visibility query is
     two-sided; a separate front-normal/incidence gate rejects back-facing hits.
     Barycentric coordinates are recomputed in 3D at the intersection.
+
+    ``timing`` is an optional accumulator dict; when given, this call adds
+    ``build_s``/``query_s``/``calls`` to it. Nothing is recorded when it is None.
     """
     if not len(points):return None,dict(rays=0,hits=0,accepted=0,reason='no_reliable_depth')
-    mesh = trimesh.Trimesh(v, f, process=False)
-    hit, ray, face = first_hits(mesh,points)
-    # trimesh ray/cache objects have reference cycles; do not accumulate trees
-    # over hundreds of offline ICP updates on a 16GB shared machine.
-    del mesh
-    gc.collect()
+    started=time.perf_counter()
+    index = RayIndex(v, f)
+    built=time.perf_counter()
+    hit, ray, face = index.first_hits(points)
+    if timing is not None:
+        finished=time.perf_counter()
+        timing['build_s']=timing.get('build_s',0.0)+(built-started)
+        timing['query_s']=timing.get('query_s',0.0)+(finished-built)
+        timing['calls']=timing.get('calls',0)+1
     if not len(hit):
         return None, dict(rays=len(points), hits=0, accepted=0)
     tri = v[f[face]]
@@ -183,11 +179,8 @@ def front_protected_vertices(vertices,faces,data,front_ids):
         grid=np.zeros_like(valid);grid[::2,::2]=True;ys,xs=np.where(valid&grid)
         pts,ok=backproject(np.column_stack((xs,ys)),d['depth'],d['intrinsics']);pts=pts[ok]
         if not len(pts):continue
-        mesh=trimesh.Trimesh(vertices[i],faces,process=False)
-        _,_,fi=first_hits(mesh,pts)
+        _,_,fi=RayIndex(vertices[i],faces).first_hits(pts)
         protected[np.unique(faces[fi])]=True
-        del mesh
-        gc.collect()
     protected[np.unique(faces[protected[faces].any(1)])]=True
     return protected
 

@@ -47,7 +47,7 @@
 ```
 facecap_airway_delivery/
 ├─ README.md                    本说明
-├─ VERSION                      0.2.0
+├─ VERSION                      0.3.0
 ├─ CHANGELOG.md
 ├─ LICENSE / THIRD_PARTY_NOTICES.md
 ├─ requirements.txt             重建环境所需的精确版本
@@ -121,7 +121,7 @@ facecap_airway_delivery/
 ### 4.4 自检
 
 ```pwsh
-.\headrgbd.cmd --version      # headrgbd 0.2.0 (facecap-inspired-v2-strict)
+.\headrgbd.cmd --version      # headrgbd 0.3.0 (facecap-inspired-v2-strict)
 .\headrgbd.cmd assets         # 7 个模型 SHA256 全部 ok
 .\headrgbd.cmd device         # 打开相机 + 载入模型
 ```
@@ -352,9 +352,12 @@ cd D:\proiect\facecap_airway_delivery
 
 ## 10. 版本
 
-`0.2.0`。`VERSION`、`--version`、`README`、`manifest.json` 四处一致。
-历史见 `CHANGELOG.md`：本次变化是**最终流程整合、入口精简、输出收敛**，
-不包含任何算法精度提升的声明。
+`0.3.0`。`VERSION`、`--version`、`README`、`manifest.json` 四处一致。
+历史见 `CHANGELOG.md`：本次变化是**射线求交实现替换 + 可选快速流程**，完整重建从
+32 分钟降到 5 分钟以内。这不是纯性能发布：射线实现与 rtree 一致到 0.15 µm，但流水线
+在重心阈值 `bc > .05` 与 QP active set 处对 1e-7 扰动敏感，因此**交付网格与 0.2.0
+不是逐位一致**，0.2.0 的验收结论不能直接沿用；本版本的质量对比基准是"同代码、不加
+快速开关"的同机运行，见 `CHANGELOG.md` 的 0.3.0 段。
 
 > 0.2.0 发布时默认只导出闭口网格；同版本的后续修订按要求改为**闭口 + 张口各一份**，
 > 版本号不变、不新增研究模式，算法与参数完全未改。
