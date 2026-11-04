@@ -1,0 +1,125 @@
+{
+  "adopted": true,
+  "eligible": true,
+  "proposed_version": "0.5.2",
+  "production_version": "0.5.2",
+  "gates": {
+    "ZP 完整重建耗时中位数不增加": true,
+    "LGH 完整重建耗时中位数不增加": true,
+    "所有重复的视角/区域误差、覆盖与平顺度通过": true,
+    "两套像素网格的共同射线下颌误差均改善": true,
+    "安全 Loop blend 0.5 与运动固定射线验收通过": true,
+    "生产源码在实验期间保持原样": true,
+    "候选源码与计时前冻结版本一致": true,
+    "批量验收关闭新约束时逐点等价": true,
+    "针对性回归测试通过": true,
+    "候选完整回归通过": true,
+    "实际项目完整回归通过": true,
+    "公共入口版本与统一默认值通过": true
+  },
+  "reasons": [],
+  "quality_runs": {
+    "zp": {
+      "baseline": "D:\\proiect\\facecap_airway_delivery\\runtime\\validation\\20261103_loss_guided\\benchmarks\\zp_interleaved\\baseline_1",
+      "candidate": "D:\\proiect\\facecap_airway_delivery\\runtime\\validation\\20261103_loss_guided\\benchmarks\\zp_interleaved\\candidate_1"
+    },
+    "lgh": {
+      "baseline": "D:\\proiect\\facecap_airway_delivery\\runtime\\validation\\20261103_loss_guided\\benchmarks\\lgh_interleaved\\baseline_1",
+      "candidate": "D:\\proiect\\facecap_airway_delivery\\runtime\\validation\\20261103_loss_guided\\benchmarks\\lgh_interleaved\\candidate_1"
+    }
+  },
+  "repeated_geometry": {
+    "zp_baseline": [
+      {
+        "repetition": 1,
+        "exactly_equal": true,
+        "max_vertex_difference_mm": 0.0
+      },
+      {
+        "repetition": 2,
+        "exactly_equal": true,
+        "max_vertex_difference_mm": 0.0
+      },
+      {
+        "repetition": 3,
+        "exactly_equal": true,
+        "max_vertex_difference_mm": 0.0
+      }
+    ],
+    "zp_candidate": [
+      {
+        "repetition": 1,
+        "exactly_equal": true,
+        "max_vertex_difference_mm": 0.0
+      },
+      {
+        "repetition": 2,
+        "exactly_equal": true,
+        "max_vertex_difference_mm": 0.0
+      },
+      {
+        "repetition": 3,
+        "exactly_equal": true,
+        "max_vertex_difference_mm": 0.0
+      }
+    ],
+    "lgh_baseline": [
+      {
+        "repetition": 1,
+        "exactly_equal": true,
+        "max_vertex_difference_mm": 0.0
+      },
+      {
+        "repetition": 2,
+        "exactly_equal": true,
+        "max_vertex_difference_mm": 0.0
+      },
+      {
+        "repetition": 3,
+        "exactly_equal": true,
+        "max_vertex_difference_mm": 0.0
+      }
+    ],
+    "lgh_candidate": [
+      {
+        "repetition": 1,
+        "exactly_equal": true,
+        "max_vertex_difference_mm": 0.0
+      },
+      {
+        "repetition": 2,
+        "exactly_equal": true,
+        "max_vertex_difference_mm": 0.0
+      },
+      {
+        "repetition": 3,
+        "exactly_equal": true,
+        "max_vertex_difference_mm": 0.0
+      }
+    ]
+  },
+  "limits": {
+    "view_mae_mm": 0.05,
+    "region_mae_mm": 0.1,
+    "view_p95_mm": 0.1,
+    "coverage_ratio": 0.001,
+    "smooth_degrees": 0.02
+  },
+  "choice": "weakest tested effective lowerface weight 0.5; weight 1 rejected on LGH",
+  "source_before_matched": true,
+  "installation": {
+    "source": "D:\\proiect\\facecap_airway_delivery\\runtime\\validation\\20261103_loss_guided\\release_candidate_source",
+    "changed_algorithm_files": [
+      "head_rgbd/motion_acceptance.py",
+      "head_rgbd/motion_v2.py",
+      "head_rgbd/cli.py",
+      "head_rgbd/pipeline.py",
+      "config/defaults.json",
+      "VERSION"
+    ],
+    "added_regression": "tests/test_loss_guided.py",
+    "version": "0.5.2",
+    "matches_frozen_candidate": true
+  },
+  "performance_conclusion": "No stable acceleration established; small quality gain with non-increasing observed full-run medians."
+}

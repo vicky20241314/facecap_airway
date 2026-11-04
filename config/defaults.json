@@ -1,0 +1,62 @@
+{
+  "schema": "head_rgbd.defaults.v2",
+  "algorithm": {
+    "name": "facecap-inspired-v2-strict",
+    "fixed_ray_policy": "strict-coverage",
+    "source": "loss-guided smooth-fast; validation in docs/LOSS_GUIDED_IMPROVEMENT_REPORT.html",
+    "note": "joint identity, reliable open lower-face correction, batched fixed-ray acceptance, safe Loop prior"
+  },
+  "reconstruction": {
+    "device": "cuda",
+    "steps": 240,
+    "front_steps": 240,
+    "motion_lowerface_weight": 0.5,
+    "shape_fusion": "joint",
+    "fast": true,
+    "chain": "lean",
+    "postfit": "minimal",
+    "mid_rounds": 1,
+    "reuse_field": true,
+    "information_measure": "barycentric",
+    "support_min_information": 0.5,
+    "coverage_allowance_ratio": 0.001,
+    "loop_data_selection": false,
+    "loop_target_blend": 0.5,
+    "bending_length_mm": 8.0,
+    "low_bending_length_mm": 8.0,
+    "points_per_frame": 1200,
+    "keyframes_per_segment": 3,
+    "expression_components": 30,
+    "dense_points": 5000
+  },
+  "export": {
+    "mesh_stage": "dense",
+    "mesh_states": [
+      "closed",
+      "open"
+    ],
+    "filenames": {
+      "closed": "head_closed_m.obj",
+      "open": "head_open_m.obj"
+    },
+    "unit": "m"
+  },
+  "capture": {
+    "frames_per_view": 5,
+    "interval_s": 0.12,
+    "warmup_s": 0.8,
+    "countdown_s": 2,
+    "views": [
+      "closed:front",
+      "closed:left",
+      "closed:right",
+      "open:front"
+    ],
+    "max_adjacent_gap_s": 0.2
+  },
+  "evidence": {
+    "normal_refinement_bound_m": 0.003,
+    "minimum_signed_area_ratio": 0.05,
+    "temporal_gap_s": 0.2
+  }
+}
