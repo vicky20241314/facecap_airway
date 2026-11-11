@@ -564,8 +564,6 @@ def main(argv: list[str] | None = None) -> int:
                 "anchor_count": (check.get("trend") or {}).get("anchor_count"),
             },
         }
-        for path in (render_dir,):
-            pass
         # store per-state geometry for rendering
         shape[state]["_geometry"] = (vb, vs, faces_b, centre, right, up, fwd, base_ry)
 
