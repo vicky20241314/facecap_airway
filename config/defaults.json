@@ -62,14 +62,16 @@
   "neck_prominence": {
     "subject_sex": "unspecified",
     "mode": "auto",
-    "amplitude_mm": 3.0,
-    "radius_x_mm": 12.0,
-    "radius_y_mm": 18.0,
+    "amplitude_mm": 8.0,
+    "radius_x_mm": 11.0,
+    "radius_y_mm": 12.0,
+    "base_radius_x_mm": 20.0,
+    "base_radius_y_mm": 16.0,
+    "base_share": 0.35,
     "candidate_amplitudes_mm": [
-      2.0,
-      3.0,
-      4.0
+      6.0,
+      8.0
     ],
-    "note": "marker-guided template prominence: a small Wendland C2 displacement of front-neck template vertices around the valid laryngeal landmark; appearance trial values, not anatomical standards; the neck front remains template-based, never measured"
+    "note": "depth-conditioned procedural prominence: amplitude_mm is the target FINAL prominence height above a fixed sagittal reference trend; the field is a wide Wendland C2 base plus a narrower central ridge; depth verifies direction and bounds support radii only; appearance trial values, not anatomical standards; the neck front remains template-based, never measured"
   }
 }

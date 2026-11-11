@@ -44,13 +44,16 @@ def test_wendland_c2_smooth_at_support_boundary():
 def test_resolve_configuration_defaults_only():
     cfg = npn.resolve_configuration({"neck_prominence": {
         "subject_sex": "unspecified", "mode": "auto",
-        "amplitude_mm": 3.0, "radius_x_mm": 12.0, "radius_y_mm": 18.0,
-        "candidate_amplitudes_mm": [2.0, 3.0, 4.0],
+        "amplitude_mm": 8.0, "radius_x_mm": 11.0, "radius_y_mm": 12.0,
+        "base_radius_x_mm": 20.0, "base_radius_y_mm": 16.0, "base_share": 0.35,
+        "candidate_amplitudes_mm": [6.0, 8.0],
     }}, None)
     assert cfg.subject_sex == "unspecified"
     assert cfg.mode == "auto"
-    assert cfg.amplitude_mm == 3.0
-    assert cfg.candidates_mm == (2.0, 3.0, 4.0)
+    assert cfg.amplitude_mm == 8.0
+    # preferred target first: 8 mm is tried before the 6 mm fallback
+    assert cfg.candidates_mm == (8.0, 6.0)
+    assert cfg.base_share == 0.35
 
 
 def test_resolve_configuration_cli_overrides():
@@ -60,13 +63,50 @@ def test_resolve_configuration_cli_overrides():
         neck_prominence_mm = 5.0
         neck_prominence_radius_x_mm = 14.0
         neck_prominence_radius_y_mm = 20.0
+        neck_prominence_base_radius_x_mm = 22.0
+        neck_prominence_base_radius_y_mm = 24.0
+        neck_prominence_base_share = 0.4
     cfg = npn.resolve_configuration({"neck_prominence": {"amplitude_mm": 3.0}}, Args())
     assert cfg.subject_sex == "male"
     assert cfg.mode == "on"
     assert cfg.amplitude_mm == 5.0
-    assert cfg.candidates_mm == (5.0,)          # explicit amplitude: single candidate
+    assert cfg.candidates_mm == (5.0,)          # explicit target: single candidate
     assert cfg.radius_x_mm == 14.0
     assert cfg.radius_y_mm == 20.0
+    assert cfg.base_radius_x_mm == 22.0
+    assert cfg.base_radius_y_mm == 24.0
+    assert cfg.base_share == 0.4
+
+
+def test_resolve_configuration_rejects_invalid_values():
+    with pytest.raises(ValueError):
+        npn.resolve_configuration({"neck_prominence": {"amplitude_mm": -1.0}}, None)
+    with pytest.raises(ValueError):
+        npn.resolve_configuration({"neck_prominence": {"amplitude_mm": float("nan")}}, None)
+    with pytest.raises(ValueError):
+        npn.resolve_configuration({"neck_prominence": {"radius_x_mm": 0.0}}, None)
+    with pytest.raises(ValueError):
+        npn.resolve_configuration({"neck_prominence": {"base_share": 1.5}}, None)
+    with pytest.raises(ValueError):
+        npn.resolve_configuration(
+            {"neck_prominence": {"radius_x_mm": 12.0, "base_radius_x_mm": 8.0}}, None
+        )
+
+
+def test_plateau_kernel_is_blunt_and_smooth():
+    w = np.asarray(npn.plateau_c2(np.array([0.0, 0.2, 0.35, 0.5, 0.8, 0.999, 1.0, 1.5])))
+    assert w[0] == pytest.approx(1.0)
+    assert w[2] == pytest.approx(1.0)           # flat crest
+    assert 0.4 < w[3] < 1.0                     # gradual fall, unlike Wendland (0.19 at r=0.5)
+    assert w[5] < 0.01 and w[6] == 0.0 and w[7] == 0.0
+    r = np.linspace(0, 1, 400)
+    vals = np.asarray(npn.plateau_c2(r))
+    assert (np.diff(vals) <= 1e-12).all()       # monotone
+    eps, h = 1e-5, 1e-7
+    slope_left = (float(npn.plateau_c2(1 - eps)) - float(npn.plateau_c2(1 - eps - h))) / h
+    assert abs(slope_left) < 1e-3               # C1 (hence C2) at the boundary
+    slope_plateau = (float(npn.plateau_c2(0.35 + h)) - float(npn.plateau_c2(0.35 - h))) / (2 * h)
+    assert abs(slope_plateau) < 1e-3            # smooth crest shoulder
 
 
 @pytest.mark.parametrize("mode,sex,observed,expected", [
@@ -162,8 +202,8 @@ def _synthetic_head_mesh():
     head_vertices = np.asarray(head.vertices, dtype=np.float64)
     head_faces = np.asarray(head.faces, dtype=np.int64)
 
-    # neck cylinder grid: 33 rings x 25 columns, front facing +z
-    rings, columns = 33, 25
+    # neck cylinder grid: 41 rings x 49 columns, front facing +z
+    rings, columns = 41, 49
     y = np.linspace(-0.10, -0.24, rings)
     theta = np.linspace(0.0, 2.0 * np.pi, columns, endpoint=False)
     grid_y, grid_t = np.meshgrid(y, theta, indexing="ij")
@@ -231,7 +271,14 @@ def test_apply_prominence_shapes_only_front_neck():
     assert (delta @ forward > 0.99 * np.linalg.norm(delta, axis=1)).all()
     # safety recorded and clean
     assert report["safety"]["problems"] == []
-    assert report["actual_amplitude_mm"] <= cfg.candidates_mm[0] * 1.001
+    # V2 shape acceptance: the measured final prominence meets the target
+    assert abs(report["final_prominence_mm"] - report["requested_final_prominence_mm"]) <= 1.0
+    assert report["target_error_mm"] == pytest.approx(
+        report["final_prominence_mm"] - report["requested_final_prominence_mm"], abs=1e-6)
+    assert report["max_vertex_displacement_mm"] <= report["calibrated_amplitude_mm"] * 1.001
+    # blunt crest: half-max extent is wide, not a single-vertex needle
+    assert report["extent"]["width_x_half_max_mm"] >= 3.0
+    assert report["extent"]["length_y_half_max_mm"] >= 3.0
 
 
 def test_apply_prominence_female_auto_is_noop():
@@ -331,14 +378,17 @@ def test_unit_conversions_are_metric():
     transform = {"status": nl.STATUS_OBSERVED, "method": "same_frame_observation",
                  "rotation_3x3": np.eye(3).tolist(), "translation_m": [0.0, 0.0, 0.0]}
     cfg = npn.ProminenceConfig(subject_sex="male", mode="on",
-                               amplitude_mm=2.0, _explicit=True)
+                               amplitude_mm=4.0, _explicit=True)
     report = npn.apply_prominence(
         state="closed", base_vertices=vertices, faces=faces,
         landmark_record=record, transform=transform,
         model_to_camera=IDENTITY, landmarks_m=landmarks, config=cfg,
     )
-    assert report["status"] == npn.STATUS_APPLIED
-    assert report["requested_amplitude_mm"] == 2.0
-    assert 0.0 < report["actual_amplitude_mm"] <= 2.0 * 1.001
-    assert report["support"]["radius_x_mm"] == pytest.approx(12.0)
-    assert report["support"]["radius_y_mm"] == pytest.approx(18.0)
+    assert report["status"] == npn.STATUS_APPLIED, report.get("reason")
+    assert report["requested_final_prominence_mm"] == 4.0
+    assert report["final_prominence_mm"] == pytest.approx(4.0, abs=1.0)
+    assert 0.0 < report["max_vertex_displacement_mm"] <= report["calibrated_amplitude_mm"] * 1.001
+    assert report["shape"]["core_radius_x_mm"] == pytest.approx(11.0)
+    assert report["shape"]["core_radius_y_mm"] == pytest.approx(12.0)
+    assert report["shape"]["base_radius_x_mm"] == pytest.approx(20.0)
+    assert report["shape"]["base_radius_y_mm"] == pytest.approx(16.0)

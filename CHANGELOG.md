@@ -1,5 +1,53 @@
 # Changelog
 
+## 0.5.4 - 2026-11-11
+
+Depth-conditioned procedural neck prominence V2 on the 0.5.2 template. Base head
+reconstruction is untouched; the optional stage is a single light pass between
+the saved baseline dense surface and the unified mesh write.
+
+- Retarget the stage from a fixed displacement amplitude to a FINAL prominence
+  height H measured on a fixed sagittal plane/mesh section against a baseline
+  reference trend anchored outside the support before shaping. Both closed and
+  open states reach the 8 mm target (error 0.0 mm) and are accepted only when
+  the shape goal (|H_final - H_target| <= 1 mm) AND every geometry check pass.
+- Replace the single narrow Wendland core with a wide Wendland C2 base plus a
+  flat-topped C2 compact-support crest (base share 0.35); a single-field control
+  at the same target fails the open state with a displacement spike.
+- Snap the shaping centre onto the template neck's own front ridge when the
+  binding lands on the ridge slope (template neck laterally offset from the
+  subject's real neck), limited to 20 mm and fully recorded.
+- Replace the graph-ring taper with a continuous taper over the actual distance
+  (6 mm ramp) from protected vertices; keep face/lips/jaw/chin/ears/back/bottom
+  protection and the exact camera-ray binding.
+- Add in-stage self-intersection detection (segment/triangle with legal
+  shared-edge contact excluded) plus a displacement spike test; edge-growth
+  limits become a hard measured cap inside the shaping region (1.58-1.75x smooth
+  flank growth recorded) instead of the plain 1.5x/+2 mm rule.
+- Record requested final height, baseline height, final height, target error,
+  binding barycentric forward displacement, max vertex displacement, actual
+  width/length, peak offset, shape parameters, depth conditioning, snap and
+  fallback reasons per state (neck_prominence.json v2).
+- Use depth only to verify direction, bound support radii against the observed
+  neck width and record reliability; target height stays a configured
+  appearance prior, never derived from unreliable depth protrusion.
+- Fix the manual landmark ROI (10% -> 2% of face-box height below the chin: the
+  old gate excluded the laryngeal region and forced clicks onto the collar) and
+  correct this capture's landmarks from recorded RGB/depth evidence; female +
+  auto still keeps every vertex identical, off still matches the clean 0.5.2
+  baseline byte for byte.
+- 31 neck tests plus the V2 verification tool (8 legacy invariants + fixed
+  shape acceptance + same-view renders and plane/mesh sections). Report:
+  docs/NECK_PROMINENCE_V2_REPORT.html.
+
+## 0.5.3 - 2026-11-11
+
+Marker-guided front-neck template prominence on the 0.5.2 baseline: minimal
+landmark localisation port (ArUco detection + manual fallback, per-state
+records), label-bound local Wendland C2 shaping with strict face protection,
+neck_prominence.json sidecar and an 8-item end-to-end verification. Superseded
+by 0.5.4 for shape quality; the 0.5.3 run and report remain archived.
+
 ## Unreleased - output performance
 
 - Default reconstruction writes only the final closed/open OBJ files in delivery.

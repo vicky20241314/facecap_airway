@@ -84,17 +84,37 @@ def _add_neck_prominence_options(parser: argparse.ArgumentParser, defaults: dict
         "--neck-prominence-mm",
         type=float,
         default=None,
-        help="explicit prominence amplitude in mm (default: few trial candidates from config)",
+        help="explicit target FINAL prominence height in mm (default: candidate targets from config)",
     )
     parser.add_argument(
         "--neck-prominence-radius-x-mm",
         type=float,
-        default=prominence.get("radius_x_mm", 12.0),
+        default=prominence.get("radius_x_mm", 11.0),
+        help="central ridge lateral radius in mm",
     )
     parser.add_argument(
         "--neck-prominence-radius-y-mm",
         type=float,
-        default=prominence.get("radius_y_mm", 18.0),
+        default=prominence.get("radius_y_mm", 12.0),
+        help="central ridge vertical radius in mm",
+    )
+    parser.add_argument(
+        "--neck-prominence-base-radius-x-mm",
+        type=float,
+        default=prominence.get("base_radius_x_mm", 20.0),
+        help="wide base field lateral radius in mm",
+    )
+    parser.add_argument(
+        "--neck-prominence-base-radius-y-mm",
+        type=float,
+        default=prominence.get("base_radius_y_mm", 16.0),
+        help="wide base field vertical radius in mm",
+    )
+    parser.add_argument(
+        "--neck-prominence-base-share",
+        type=float,
+        default=prominence.get("base_share", 0.35),
+        help="share of the prominence height carried by the wide base field",
     )
 
 

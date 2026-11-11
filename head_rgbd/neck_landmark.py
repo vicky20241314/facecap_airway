@@ -81,7 +81,9 @@ def neck_roi(image_width: int, image_height: int, face_bbox: list | tuple | None
     x, y, w, h = [float(v) for v in face_bbox]
     x0 = max(0, int(x - 0.25 * w))
     x1 = min(image_width, int(x + 1.25 * w))
-    y0 = min(image_height, int(y + h + 0.10 * h))
+    # The laryngeal prominence sits directly below the chin; a 10%-of-box
+    # margin pushed this ROI onto the collar and forced mis-localised clicks.
+    y0 = min(image_height, int(y + h + 0.02 * h))
     y1 = min(image_height, int(y + h + 2.4 * h))
     if x1 <= x0 or y1 <= y0:
         return {

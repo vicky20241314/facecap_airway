@@ -439,6 +439,7 @@ def export_delivery(
                 model_to_camera=reference["animated_model_to_reference_camera_4x4"],
                 landmarks_m=stage_reference["landmarks_m"],
                 config=prominence_config,
+                prepared_dir=Path(sequence).parent,
             )
             shaped_vertices = prominence_report.pop("shaped_vertices", None)
             prominence_reports[state] = prominence_report
@@ -534,7 +535,7 @@ def export_delivery(
         report.get("status") == npn.STATUS_APPLIED for report in prominence_reports.values()
     )
     neck_prominence_payload = {
-        "schema": "head_rgbd.delivery.neck_prominence.v1",
+        "schema": "head_rgbd.delivery.neck_prominence.v2",
         "base_algorithm_version": "0.5.2",
         "neck_method": npn.NECK_METHOD,
         "geometry_source": npn.GEOMETRY_SOURCE,
@@ -546,26 +547,35 @@ def export_delivery(
         "landmark_source": {
             state: report.get("landmark_source") for state, report in prominence_reports.items()
         },
-        "requested_amplitude_mm": prominence_config.amplitude_mm,
+        "requested_final_prominence_mm": prominence_config.amplitude_mm,
+        "candidate_final_prominence_mm": [float(v) for v in prominence_config.candidate_amplitudes_mm],
         "requested_radius_x_mm": prominence_config.radius_x_mm,
         "requested_radius_y_mm": prominence_config.radius_y_mm,
+        "requested_base_radius_x_mm": prominence_config.base_radius_x_mm,
+        "requested_base_radius_y_mm": prominence_config.base_radius_y_mm,
+        "requested_base_share": prominence_config.base_share,
         "states": {
             state: {
                 key: report.get(key)
                 for key in (
                     "status", "reason", "effective_enabled", "landmark_source",
-                    "requested_amplitude_mm", "actual_amplitude_mm", "selected_amplitude_mm",
-                    "candidate_amplitudes_mm", "binding", "direction", "support",
-                    "protection", "safety", "transform", "point_reference_camera_m",
-                    "elapsed_ms",
+                    "requested_final_prominence_mm", "baseline_prominence_mm",
+                    "final_prominence_mm", "target_error_mm",
+                    "binding_forward_displacement_mm", "max_vertex_displacement_mm",
+                    "calibrated_amplitude_mm", "candidate_amplitudes_mm",
+                    "shape", "extent", "trend", "calibration", "centre_snap",
+                    "depth_conditioning", "candidate_attempts",
+                    "binding", "direction", "support", "protection", "safety",
+                    "transform", "point_reference_camera_m", "elapsed_ms",
                 )
             }
             for state, report in prominence_reports.items()
         },
         "statement": (
-            "label-localised template shaping only: the laryngeal landmark positions a small "
-            "procedural Wendland C2 displacement of front-neck template vertices; it is not a "
-            "measured neck reconstruction and does not restore any measured neck geometry"
+            "appearance shaping of the template neck only: the validated laryngeal landmark and the "
+            "template neck ridge locate a depth-conditioned, target-height-calibrated two-field "
+            "procedural displacement of front-neck template vertices; it is not a measured neck "
+            "reconstruction, performs no per-point neck fitting and does not restore measured neck geometry"
         ),
     }
     write_json_exclusive(output / "neck_prominence.json", neck_prominence_payload)
@@ -647,7 +657,7 @@ def export_delivery(
             "support labels separate real observations, correlated bursts plus prior and unobserved completion",
             "closed and open meshes are two states of one shared identity; they are not registered to each other by any external measurement",
             "this is a FaceCap-inspired offline FLAME prototype, not a FaceCap reproduction",
-            "neck front geometry is template-based: any prominence is a label-localised procedural deformation, not a measured reconstruction",
+            "neck front geometry is template-based: any prominence is a depth-conditioned procedural appearance deformation with a calibrated target height, not a measured reconstruction",
         ],
         "environment": {
             "runtime": str(runtime),

@@ -33,6 +33,12 @@ Loop 目标 0.5，先检查几何安全，失败才回退；默认不做三候�
 张口下颌同源深度残差小幅下降，平顺度与覆盖通过验收。完整计时存在明显波动，未确认稳定提速。
 实验数据、全部耗时与收益边界见 [HTML 分析报告](docs/LOSS_GUIDED_IMPROVEMENT_REPORT.html)。
 
+0.5.4 增加可选的标签驱动颈前塑形（默认 `auto`：仅当显式 `--subject-sex male` 且存在有效标签时启用，
+女性与未声明性别保持模板颈部零位移）。它只做模板颈部的**外观塑形**：深度仅用于核对方向与约束支撑尺度，
+目标为固定剖面上实测的最终隆起高度（配置默认 8 mm），由“宽基底 + 圆钝脊峰”双场实现并按形状与几何安全
+双重验收；关闭时输出与纯 0.5.2 基线按字节一致。参数在 `config/defaults.json` 的 `neck_prominence` 节，
+验收与渲染见 [颈前塑形 V2 报告](docs/NECK_PROMINENCE_V2_REPORT.html)。
+
 ---
 
 ## 1. 这是什么、能做到什么、做不到什么
@@ -67,7 +73,7 @@ Loop 目标 0.5，先检查几何安全，失败才回退；默认不做三候�
 ```
 facecap_airway_delivery/
 ├─ README.md                    本说明
-├─ VERSION                      0.5.2
+├─ VERSION                      0.5.4
 ├─ CHANGELOG.md
 ├─ VALIDATION.md                本机实际验证记录
 ├─ docs/FAST_PATH_REPORT.md     0.3.0 加速版算法：实测、消融与剩余热点（权威）
@@ -144,7 +150,7 @@ facecap_airway_delivery/
 ### 4.4 自检
 
 ```pwsh
-.\headrgbd.cmd --version      # headrgbd 0.5.2 (facecap-inspired-v2-strict)
+.\headrgbd.cmd --version      # headrgbd 0.5.4 (facecap-inspired-v2-strict)
 .\headrgbd.cmd assets         # 7 个模型 SHA256 全部 ok
 .\headrgbd.cmd device         # 打开相机 + 载入模型
 ```
@@ -529,7 +535,11 @@ OSQP 迭代）。要再压缩需要改 QP 的缩放/条件数，本轮未做，�
 
 ## 10. 版本
 
-`0.4.0`。`VERSION`、`--version`、`README`、`manifest.json` 四处一致。
+`0.5.4`。`VERSION`、`--version`、`README`、`manifest.json` 四处一致。
+
+0.5.4 在 0.5.2 基线上增加深度辅助定参的颈前塑形（`depth_conditioned_procedural_prominence`）。
+0.5.3 为同一阶段的初版（单场、固定幅值），已被 0.5.4 取代并保留存档；本版默认关闭重建相关行为不变，
+头部重建算法与 0.5.2 完全相同。
 
 本版本新增**正侧面联合形状融合**（`--shape-fusion joint`）：正面、左侧、右侧观测共同决定
 同一个 FLAME 身份与局部修正场，替代"冻结身份 + 硬锁正面"的旧规则。0.5.0 已默认使用 `joint`，
