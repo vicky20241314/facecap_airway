@@ -228,7 +228,8 @@ def main(argv: list[str] | None = None) -> int:
 
 <h2>6. 交付物</h2>
 <ul>
-<li>代码与统一配置：worktree <code>D:\\proiect\\facecap_airway_delivery_052_neck_bump</code>（分支 codex/rollback-052-neck-bump，commit 0c07f76）</li>
+<li>代码与统一配置：主项目 <code>D:\\proiect\\facecap_airway_delivery</code>（分支 release/0.5.3-neck-prominence，实现 commit 0c07f76 + 报告 a00b9ad + 契约更新 4b3731f）；实验存档 worktree <code>D:\\proiect\\facecap_airway_delivery_052_neck_bump</code>（分支 codex/rollback-052-neck-bump）保留</li>
+<li>旧实验工作区存档：tag <code>backup-20261111-full-workspace</code>、分支 <code>archive/pre-rollback-20261111</code>、stash@&#123;0&#125;（含全部未提交/未跟踪文件）与 D:\\proiect\\_backup_20261111\\ 哈希清单；旧颈部阶段模块已不在主目录工作树中，无法影响结果</li>
 <li>纯 0.5.2 基线输出（已保存）：<code>runtime/outputs/zp_052_neck_bump_baseline</code></li>
 <li>male 0.5.3 特性运行：<code>runtime/outputs/zp_052_neck_bump_male_053</code>（delivery/ 含 head_closed_m.obj、head_open_m.obj、neck_prominence.json、manifest.json；闭口/张口均为共享拓扑的同一 FLAME 网格 + 局部位移）</li>
 <li>标签文件与最终网格绑定：neck_landmarks.json + neck_prominence.json 中的 binding（三角形索引 + 重心坐标 + 标签/基线/塑形三点）</li>
