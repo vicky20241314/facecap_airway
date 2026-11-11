@@ -81,6 +81,13 @@ def _add_neck_prominence_options(parser: argparse.ArgumentParser, defaults: dict
         help="auto: male + valid landmark enables shaping, female/unspecified keep the template neck",
     )
     parser.add_argument(
+        "--neck-algorithm",
+        choices=("observation", "manual_edit"),
+        default=prominence.get("algorithm", "observation"),
+        help="observation: subject-observed background+ridge fit (default, 0.5.5); "
+             "manual_edit: fixed-amplitude appearance editor (marked as an edit, not a reconstruction)",
+    )
+    parser.add_argument(
         "--neck-prominence-mm",
         type=float,
         default=None,

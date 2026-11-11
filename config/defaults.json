@@ -72,6 +72,7 @@
       6.0,
       8.0
     ],
-    "note": "depth-conditioned procedural prominence: amplitude_mm is the target FINAL prominence height above a fixed sagittal reference trend; the field is a wide Wendland C2 base plus a narrower central ridge; depth verifies direction and bounds support radii only; appearance trial values, not anatomical standards; the neck front remains template-based, never measured"
+    "note": "observation-driven V3: a frozen quadratic background is fitted to this subject's depth observations and a small strongly-priored ridge (|h| <= 3 mm) plus a bounded residual accounts for the local shape; algorithm=manual_edit switches to the fixed-amplitude two-field editor, which is an appearance EDIT, not a subject reconstruction; the neck front remains template-based",
+    "algorithm": "observation"
   }
 }

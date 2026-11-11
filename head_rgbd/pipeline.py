@@ -345,6 +345,103 @@ SUPPORT_LABELS = [
 ]
 
 
+def _observation_prominence(
+    *, state, base_vertices, faces, landmark_record, transform, model_to_camera,
+    landmarks_m, reference, config, prepared_dir,
+):
+    """Subject-observed V3 neck correction for the public export entry."""
+    from head_rgbd import neck_subject_v3 as n3
+    from head_rgbd import neck_prominence as npn
+    from head_rgbd import neck_landmark as nl
+    import numpy as np
+    import time as _time
+
+    started = _time.perf_counter()
+    report = {
+        "state": state,
+        "neck_method": n3.NECK_METHOD_V3,
+        "geometry_source": n3.GEOMETRY_SOURCE_V3,
+        "editing_mode": False,
+        "subject_sex": config.subject_sex,
+        "mode": config.mode,
+    }
+    observed = landmark_record.get("status") == "observed" and landmark_record.get("point_observed_m")
+    enabled, reason = npn.effective_enable(config, bool(observed))
+    report["effective_enabled"] = bool(enabled)
+    report["landmark_source"] = landmark_record.get("source")
+    if not enabled:
+        report.update(status="skipped", reason=reason,
+                      elapsed_ms=(_time.perf_counter() - started) * 1000.0)
+        return report
+    if transform.get("status") != "observed":
+        report.update(status="skipped", reason=transform.get("reason") or "transform_unavailable",
+                      elapsed_ms=(_time.perf_counter() - started) * 1000.0)
+        return report
+    point = nl.apply_transform(landmark_record["point_observed_m"], transform)
+    if point is None:
+        report.update(status="skipped", reason="transform_application_failed",
+                      elapsed_ms=(_time.perf_counter() - started) * 1000.0)
+        return report
+    frame_id = reference["frame_id"]
+    annotation_frame = transform.get("annotation_frame")
+    if annotation_frame not in (None, frame_id):
+        report.update(status="skipped", reason="cross_frame_observation_unsupported",
+                      elapsed_ms=_time.perf_counter() * 1000.0)
+        return report
+    segment = landmark_record.get("segment_file") or f"{frame_id}.npz"
+    path = Path(prepared_dir) / segment
+    if not path.is_file():
+        report.update(status="skipped", reason="prepared_segment_missing",
+                      elapsed_ms=(_time.perf_counter() - started) * 1000.0)
+        return report
+    data = np.load(path, allow_pickle=False)
+    lm_cam = np.asarray(landmarks_m, dtype=float)
+    head_up = lm_cam[npn.NOSE_BRIDGE_TOP] - lm_cam[npn.CHIN]
+    head_up /= np.linalg.norm(head_up)
+    vertices = np.asarray(base_vertices, dtype=float)
+    try:
+        obs = n3.collect_observations(
+            state=state, frame_id=frame_id, depth=data["depth"], neck_mask=data["neck_mask"],
+            intrinsics=data["intrinsics"],
+            label_pixel=tuple(landmark_record.get("pixel_uv") or [0.0, 0.0]),
+            label_point=np.asarray(point, dtype=float),
+            head_up_camera=head_up, baseline_vertices=vertices, faces=faces,
+        )
+        M = np.asarray(model_to_camera, dtype=float)
+        rot, trans = M[:3, :3], M[:3, 3]
+        lm_model = (lm_cam - trans) @ rot
+        axes = npn._direction_frame(lm_model)
+        normals_model = npn.vertex_normals((vertices - trans) @ rot, faces)
+        protection = npn._protected_mask((vertices - trans) @ rot, lm_model, normals_model, axes)
+        normals_cam = normals_model @ rot.T
+        fit = n3.fit_state(obs, vertices=vertices, faces=faces, frame=obs.frame,
+                           protected=protection["mask"], vertex_normals=normals_cam)
+        applied = n3.apply_field(
+            vertices=vertices, faces=faces, frame=obs.frame, background=fit.background,
+            theta=fit.theta, protected=protection["mask"], vertex_normals=normals_cam,
+            residual_coefficients=fit.residual_coefficients,
+        )
+    except Exception as error:  # keep the baseline rather than block the export
+        report.update(status="skipped", reason=f"observation_fit_failed:{type(error).__name__}",
+                      elapsed_ms=(_time.perf_counter() - started) * 1000.0)
+        return report
+    disp = np.abs(applied["applied_mm"])
+    report.update(
+        status="applied",
+        reason=None,
+        moved_vertices=int((disp > 1e-6).sum()),
+        max_displacement_mm=round(float(disp.max()), 3),
+        ridge_parameters=fit.diagnostics.get("parameters"),
+        background=fit.diagnostics.get("background"),
+        depth_observation_rms_mm=fit.diagnostics.get("depth_rms_mm"),
+        residual_max_mm=fit.diagnostics.get("residual_max_mm"),
+        observation_supported=None,
+        elapsed_ms=(_time.perf_counter() - started) * 1000.0,
+    )
+    report["shaped_vertices"] = applied["shaped_vertices"]
+    return report
+
+
 def export_delivery(
     *,
     fit: Path,
@@ -430,17 +527,35 @@ def export_delivery(
             transform = nl.resolve_reference_transform(
                 landmark_record, sequence_rows, reference["frame_id"]
             )
-            prominence_report = npn.apply_prominence(
-                state=state,
-                base_vertices=base_vertices,
-                faces=saved_dense[1],
-                landmark_record=landmark_record,
-                transform=transform,
-                model_to_camera=reference["animated_model_to_reference_camera_4x4"],
-                landmarks_m=stage_reference["landmarks_m"],
-                config=prominence_config,
-                prepared_dir=Path(sequence).parent,
-            )
+            algorithm = str(getattr(args, "neck_algorithm", None)
+                            or (defaults.get("neck_prominence") or {}).get("algorithm", "observation"))
+            if algorithm == "observation":
+                prominence_report = _observation_prominence(
+                    state=state,
+                    base_vertices=base_vertices,
+                    faces=saved_dense[1],
+                    landmark_record=landmark_record,
+                    transform=transform,
+                    model_to_camera=reference["animated_model_to_reference_camera_4x4"],
+                    landmarks_m=stage_reference["landmarks_m"],
+                    reference=reference,
+                    config=prominence_config,
+                    prepared_dir=Path(sequence).parent,
+                )
+            else:
+                prominence_report = npn.apply_prominence(
+                    state=state,
+                    base_vertices=base_vertices,
+                    faces=saved_dense[1],
+                    landmark_record=landmark_record,
+                    transform=transform,
+                    model_to_camera=reference["animated_model_to_reference_camera_4x4"],
+                    landmarks_m=stage_reference["landmarks_m"],
+                    config=prominence_config,
+                    prepared_dir=Path(sequence).parent,
+                )
+                prominence_report["neck_method"] = "manual_edit_two_field_prominence"
+                prominence_report["editing_mode"] = True
             shaped_vertices = prominence_report.pop("shaped_vertices", None)
             prominence_reports[state] = prominence_report
             export_vertices = (
@@ -537,8 +652,17 @@ def export_delivery(
     neck_prominence_payload = {
         "schema": "head_rgbd.delivery.neck_prominence.v2",
         "base_algorithm_version": "0.5.2",
-        "neck_method": npn.NECK_METHOD,
-        "geometry_source": npn.GEOMETRY_SOURCE,
+        "neck_method": next(
+            (r.get("neck_method") for r in prominence_reports.values() if r.get("neck_method")),
+            npn.NECK_METHOD,
+        ),
+        "editing_mode": bool(any(r.get("editing_mode") for r in prominence_reports.values())),
+        "neck_algorithm": str(getattr(args, "neck_algorithm", None)
+                              or (defaults.get("neck_prominence") or {}).get("algorithm", "observation")),
+        "geometry_source": next(
+            (r.get("geometry_source") for r in prominence_reports.values() if r.get("geometry_source")),
+            npn.GEOMETRY_SOURCE,
+        ),
         "effective_enabled": bool(any_applied),
         "subject_sex": prominence_config.subject_sex,
         "mode": prominence_config.mode,
@@ -559,6 +683,9 @@ def export_delivery(
                 key: report.get(key)
                 for key in (
                     "status", "reason", "effective_enabled", "landmark_source",
+                    "editing_mode", "neck_method", "geometry_source",
+                    "moved_vertices", "max_displacement_mm", "ridge_parameters",
+                    "background", "depth_observation_rms_mm", "residual_max_mm",
                     "requested_final_prominence_mm", "baseline_prominence_mm",
                     "final_prominence_mm", "target_error_mm",
                     "binding_forward_displacement_mm", "max_vertex_displacement_mm",

@@ -73,7 +73,7 @@ Loop 目标 0.5，先检查几何安全，失败才回退；默认不做三候�
 ```
 facecap_airway_delivery/
 ├─ README.md                    本说明
-├─ VERSION                      0.5.4
+├─ VERSION                      0.5.5
 ├─ CHANGELOG.md
 ├─ VALIDATION.md                本机实际验证记录
 ├─ docs/FAST_PATH_REPORT.md     0.3.0 加速版算法：实测、消融与剩余热点（权威）
@@ -150,7 +150,7 @@ facecap_airway_delivery/
 ### 4.4 自检
 
 ```pwsh
-.\headrgbd.cmd --version      # headrgbd 0.5.4 (facecap-inspired-v2-strict)
+.\headrgbd.cmd --version      # headrgbd 0.5.5 (facecap-inspired-v2-strict)
 .\headrgbd.cmd assets         # 7 个模型 SHA256 全部 ok
 .\headrgbd.cmd device         # 打开相机 + 载入模型
 ```
@@ -535,7 +535,12 @@ OSQP 迭代）。要再压缩需要改 QP 的缩放/条件数，本轮未做，�
 
 ## 10. 版本
 
-`0.5.4`。`VERSION`、`--version`、`README`、`manifest.json` 四处一致。
+`0.5.5`。`VERSION`、`--version`、`README`、`manifest.json` 四处一致。
+
+0.5.5 把颈前阶段改为观测驱动：局部颈坐标系、冻结二次背景、有符号圆钝脊形与受限残差，
+用真实首命中深度拟合并按固定协议验收（默认 `neck_prominence.algorithm=observation`）。
+`manual_edit` 保留为明确标注的外观编辑，不冒充本人重建。本次采集的结论是：深度支持背景校正
+（首命中中位误差降到约 0 mm），但不支持明显喉结；交付为“几何安全、形态保真未证实”。
 
 0.5.4 在 0.5.2 基线上增加深度辅助定参的颈前塑形（`depth_conditioned_procedural_prominence`）。
 0.5.3 为同一阶段的初版（单场、固定幅值），已被 0.5.4 取代并保留存档；本版默认关闭重建相关行为不变，

@@ -1,5 +1,37 @@
 # Changelog
 
+## 0.5.5 - 2026-11-11
+
+Subject-observed neck reconstruction V3. Replaces the fixed-height procedural
+prominence with an observation-driven local fit on the saved 0.5.2 geometry
+(no FLAME re-run).
+
+- Local neck frame per state from the depth observations (label origin, plane
+  normal, observed midline refinement; head pose only initializes).
+- Frozen low-order quadratic background fitted to all reliable observations
+  (six coefficients, cannot form a local bump), plus a signed rounded-ridge
+  model (height, lateral width, tip rounding, centre offset/tilt, peak position,
+  independent up/down transitions; |height| bounded to 3 mm) and a strongly
+  priored bounded residual field. The fit is robust and binned; the depth term
+  uses the true first hit with a per-pixel normal/ray response factor.
+- Deterministic red-green refinement of the front-neck patch (shared refined
+  topology for closed/open, per-state midpoint positions, midpoint protection
+  inherited); delivery marks the refined geometry.
+- Acceptance on a fixed observation set: exact first-hit depth, no-hit 30 mm
+  penalty, no truncation, MAE/P95/coverage vs baseline and V2; facial first-hit
+  protection with a 0.05 mm engineering tolerance on facial-surface hits;
+  pre-existing degenerate FLAME faces excluded from the reversal count; formal
+  geometry guards (area/normal/slender/edge-growth cap/self-intersection).
+- Finding for this capture: the depth data does not support a clear laryngeal
+  prominence. After the background correction the local excess at the label is
+  -0.5 mm (closed) / -0.7 mm (open) with 0.3-0.6 mm background spread; V2's
+  8 mm shape has no observation basis. Delivered geometry follows the skin
+  (closed first-hit MAE 13.6 -> 7.4 mm, open 5.8 -> 3.3 mm) and the report
+  states "geometry safe, shape fidelity unproven".
+- Public entry: `neck_prominence.algorithm` = `observation` (default) or
+  `manual_edit`; the manual two-field editor stays available but is marked as
+  an appearance edit, not a subject reconstruction. Report:
+  docs/NECK_SUBJECT_V3_REPORT.html and the run directory.
 ## 0.5.4 - 2026-11-11
 
 Depth-conditioned procedural neck prominence V2 on the 0.5.2 template. Base head
