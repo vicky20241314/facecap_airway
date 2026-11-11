@@ -36,7 +36,7 @@ from head_rgbd.paths import PROJECT_ROOT, asset_paths, resolve_runtime_dir, veri
 from head_rgbd.reference_contract import inner_lip_gap_mm, observed_landmarks_m
 
 
-EXPECTED_VERSION = "0.5.2"
+EXPECTED_VERSION = "0.5.3"
 
 
 class VersionContract(unittest.TestCase):
@@ -421,6 +421,7 @@ class ExportContract(unittest.TestCase):
                     "head_closed_m.obj",
                     "head_open_m.obj",
                     "manifest.json",
+                    "neck_prominence.json",
                     "reference_landmarks.json",
                     "support.json",
                 ],
@@ -447,6 +448,14 @@ class ExportContract(unittest.TestCase):
             self.assertIsNone(landmarks["states"]["closed"]["observed_landmarks_m"][0])
             self.assertEqual(landmarks["states"]["closed"]["landmark_count"], 3)
             self.assertEqual(landmarks["states"]["open"]["mesh"], "head_open_m.obj")
+            neck = json.loads((output / "neck_prominence.json").read_text(encoding="utf-8"))
+            self.assertEqual(neck["base_algorithm_version"], "0.5.2")
+            self.assertEqual(neck["neck_method"], "marker_guided_template_prominence")
+            self.assertEqual(neck["geometry_source"], "template_plus_procedural_deformation")
+            self.assertFalse(neck["effective_enabled"])
+            for state in ("closed", "open"):
+                self.assertIn(state, neck["states"])
+                self.assertTrue(neck["states"][state]["reason"])
 
     def test_missing_open_reference_is_a_hard_error(self):
         with tempfile.TemporaryDirectory() as name:
