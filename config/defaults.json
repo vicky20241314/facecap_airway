@@ -58,5 +58,18 @@
     "normal_refinement_bound_m": 0.003,
     "minimum_signed_area_ratio": 0.05,
     "temporal_gap_s": 0.2
+  },
+  "neck_prominence": {
+    "subject_sex": "unspecified",
+    "mode": "auto",
+    "amplitude_mm": 3.0,
+    "radius_x_mm": 12.0,
+    "radius_y_mm": 18.0,
+    "candidate_amplitudes_mm": [
+      2.0,
+      3.0,
+      4.0
+    ],
+    "note": "marker-guided template prominence: a small Wendland C2 displacement of front-neck template vertices around the valid laryngeal landmark; appearance trial values, not anatomical standards; the neck front remains template-based, never measured"
   }
 }

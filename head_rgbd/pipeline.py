@@ -354,6 +354,7 @@ def export_delivery(
     capture: Path | None,
     runner: StageRunner,
     defaults: dict[str, Any],
+    args: Any | None = None,
 ) -> dict[str, Any]:
     """Write one closed and one open final mesh, one manifest and the sidecars.
 
@@ -362,14 +363,31 @@ def export_delivery(
     identity and the same topology; only the per-frame pose/expression/jaw of the
     reference frame differs. No coarse, anchor, smooth-base or comparison mesh is
     exported, and no debug switch exists in the user flow.
+
+    After the baseline dense surface is read and before either mesh is written,
+    the optional marker-guided neck prominence stage may displace a small
+    connected patch of front-neck vertices around the valid laryngeal landmark.
+    It is label-localised template shaping, never a measured neck
+    reconstruction; with the stage off, absent or unsafe the baseline geometry is
+    delivered unchanged.
     """
     from head_rgbd import __version__
+    from head_rgbd import neck_landmark as nl
+    from head_rgbd import neck_prominence as npn
     import shutil
 
     output.mkdir(parents=True, exist_ok=True)
     fit_report = json.loads((fit / "report.json").read_text(encoding="utf-8"))
     references = json.loads((fit / "reference_geometry.json").read_text(encoding="utf-8"))
     sequence_info = inspect_sequence(sequence)
+    sequence_rows = json.loads(Path(sequence).read_text(encoding="utf-8")).get("frames", [])
+
+    prominence_config = npn.resolve_configuration(defaults, args)
+    landmarks_path = getattr(args, "neck_landmarks", None)
+    if landmarks_path is None:
+        fallback = output.parent / nl.LANDMARKS_FILE
+        landmarks_path = fallback if fallback.is_file() else None
+    landmarks_payload, landmarks_reason = nl.load_neck_landmarks(landmarks_path)
 
     stage = defaults["export"]["mesh_stage"]
     states = list(defaults["export"]["mesh_states"])
@@ -378,6 +396,7 @@ def export_delivery(
     filenames = dict(defaults["export"]["filenames"])
     geometries: dict[str, dict[str, Any]] = {}
     exports: dict[str, dict[str, Any]] = {}
+    prominence_reports: dict[str, dict[str, Any]] = {}
     saved_dense = None
     for state in states:
         reference = references["references"][state]
@@ -400,10 +419,44 @@ def export_delivery(
                 raise ValueError('invalid final mesh reference frame index')
             if fit_report['frames'][frame]['id'] != reference['frame_id']:
                 raise ValueError('final mesh frame index does not match the declared reference frame')
-            trimesh.Trimesh(saved_dense[0][frame], saved_dense[1], process=False).export(
+            base_vertices = saved_dense[0][frame]
+
+            # Marker-guided neck prominence: one application point, after the
+            # baseline dense surface exists and before anything is written.
+            landmark_record = (
+                (landmarks_payload or {}).get("states", {}).get(state)
+                or nl.unavailable_record(state, landmarks_reason or "no_neck_landmarks_file")
+            )
+            transform = nl.resolve_reference_transform(
+                landmark_record, sequence_rows, reference["frame_id"]
+            )
+            prominence_report = npn.apply_prominence(
+                state=state,
+                base_vertices=base_vertices,
+                faces=saved_dense[1],
+                landmark_record=landmark_record,
+                transform=transform,
+                model_to_camera=reference["animated_model_to_reference_camera_4x4"],
+                landmarks_m=stage_reference["landmarks_m"],
+                config=prominence_config,
+            )
+            shaped_vertices = prominence_report.pop("shaped_vertices", None)
+            prominence_reports[state] = prominence_report
+            export_vertices = (
+                shaped_vertices if shaped_vertices is not None else base_vertices
+            )
+            trimesh.Trimesh(export_vertices, saved_dense[1], process=False).export(
                 final_mesh, include_normals=True)
         else:
             # Historical runs already contain the final dense OBJ files.
+            prominence_reports[state] = {
+                "state": state,
+                "status": npn.STATUS_SKIPPED,
+                "reason": "legacy_mesh_storage_shaping_unsupported",
+                "effective_enabled": False,
+                "neck_method": npn.NECK_METHOD,
+                "geometry_source": npn.GEOMETRY_SOURCE,
+            }
             shutil.copy2(fit / stage_reference['mesh'], final_mesh)
         geometries[state] = mesh_checks(final_mesh, stage_reference)
         exports[state] = {"reference": reference, "mesh": final_mesh, "geometry": geometries[state]}
@@ -476,6 +529,47 @@ def export_delivery(
     write_json_exclusive(output / "reference_landmarks.json", landmark_payload)
 
     neck = fit_report.get("neck", [])
+
+    any_applied = any(
+        report.get("status") == npn.STATUS_APPLIED for report in prominence_reports.values()
+    )
+    neck_prominence_payload = {
+        "schema": "head_rgbd.delivery.neck_prominence.v1",
+        "base_algorithm_version": "0.5.2",
+        "neck_method": npn.NECK_METHOD,
+        "geometry_source": npn.GEOMETRY_SOURCE,
+        "effective_enabled": bool(any_applied),
+        "subject_sex": prominence_config.subject_sex,
+        "mode": prominence_config.mode,
+        "landmarks_file": str(landmarks_path) if landmarks_path else None,
+        "landmarks_sha256": landmarks_payload.get("sha256") if landmarks_payload else None,
+        "landmark_source": {
+            state: report.get("landmark_source") for state, report in prominence_reports.items()
+        },
+        "requested_amplitude_mm": prominence_config.amplitude_mm,
+        "requested_radius_x_mm": prominence_config.radius_x_mm,
+        "requested_radius_y_mm": prominence_config.radius_y_mm,
+        "states": {
+            state: {
+                key: report.get(key)
+                for key in (
+                    "status", "reason", "effective_enabled", "landmark_source",
+                    "requested_amplitude_mm", "actual_amplitude_mm", "selected_amplitude_mm",
+                    "candidate_amplitudes_mm", "binding", "direction", "support",
+                    "protection", "safety", "transform", "point_reference_camera_m",
+                    "elapsed_ms",
+                )
+            }
+            for state, report in prominence_reports.items()
+        },
+        "statement": (
+            "label-localised template shaping only: the laryngeal landmark positions a small "
+            "procedural Wendland C2 displacement of front-neck template vertices; it is not a "
+            "measured neck reconstruction and does not restore any measured neck geometry"
+        ),
+    }
+    write_json_exclusive(output / "neck_prominence.json", neck_prominence_payload)
+
     warnings = _quality_warnings(fit_report, sequence_info, support)
     warnings += _state_warnings(exports, stage)
     frames = [
@@ -540,9 +634,11 @@ def export_delivery(
         "sidecars": {
             "support": "support.json",
             "reference_landmarks": "reference_landmarks.json",
+            "neck_prominence": "neck_prominence.json",
             "run_report": "run_report.json",
         },
         "neck": neck,
+        "neck_prominence": neck_prominence_payload,
         "support_counts": dict(zip(SUPPORT_LABELS, counts)),
         "warnings": warnings,
         "limitations": fit_report.get("limitations", [])
@@ -551,6 +647,7 @@ def export_delivery(
             "support labels separate real observations, correlated bursts plus prior and unobserved completion",
             "closed and open meshes are two states of one shared identity; they are not registered to each other by any external measurement",
             "this is a FaceCap-inspired offline FLAME prototype, not a FaceCap reproduction",
+            "neck front geometry is template-based: any prominence is a label-localised procedural deformation, not a measured reconstruction",
         ],
         "environment": {
             "runtime": str(runtime),
@@ -711,8 +808,10 @@ def run_pipeline(
             capture=capture if capture_is_recorded_session else None,
             runner=runner,
             defaults=defaults,
+            args=args,
         )
         runner.report['configuration'] = manifest['configuration']
+        runner.report['neck_prominence'] = manifest['neck_prominence']
         code = runner.finish(
             statuses={
                 "pipeline_execution": "passed",

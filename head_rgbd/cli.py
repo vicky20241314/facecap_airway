@@ -58,6 +58,46 @@ def _add_capture_options(parser: argparse.ArgumentParser, defaults: dict) -> Non
     parser.add_argument("--no-preview", action="store_true", help="hide the OpenCV preview window")
 
 
+def _add_neck_prominence_options(parser: argparse.ArgumentParser, defaults: dict) -> None:
+    """Marker-guided neck-front prominence; defaults come only from config."""
+    prominence = defaults.get("neck_prominence") or {}
+    parser.add_argument(
+        "--neck-landmarks",
+        type=Path,
+        default=None,
+        help="neck_landmarks.json sidecar (one laryngeal landmark record per state); "
+             "falls back to <run>/neck_landmarks.json",
+    )
+    parser.add_argument(
+        "--subject-sex",
+        choices=("male", "female", "unspecified"),
+        default=prominence.get("subject_sex", "unspecified"),
+        help="user-declared subject sex for --neck-prominence auto; never inferred",
+    )
+    parser.add_argument(
+        "--neck-prominence",
+        choices=("auto", "on", "off"),
+        default=prominence.get("mode", "auto"),
+        help="auto: male + valid landmark enables shaping, female/unspecified keep the template neck",
+    )
+    parser.add_argument(
+        "--neck-prominence-mm",
+        type=float,
+        default=None,
+        help="explicit prominence amplitude in mm (default: few trial candidates from config)",
+    )
+    parser.add_argument(
+        "--neck-prominence-radius-x-mm",
+        type=float,
+        default=prominence.get("radius_x_mm", 12.0),
+    )
+    parser.add_argument(
+        "--neck-prominence-radius-y-mm",
+        type=float,
+        default=prominence.get("radius_y_mm", 18.0),
+    )
+
+
 def _add_fit_options(parser: argparse.ArgumentParser, defaults: dict) -> None:
     reconstruction = defaults["reconstruction"]
     parser.add_argument("--device", choices=("cuda", "cpu"), default=reconstruction["device"])
@@ -289,19 +329,25 @@ def command_export(args: argparse.Namespace) -> int:
         raise FileNotFoundError(f"completed dense reconstruction not found under {run}")
     if not sequence.is_file():
         raise FileNotFoundError(f"prepared sequence not found: {sequence}")
+    delivery = (
+        Path(args.delivery_output).expanduser().resolve()
+        if getattr(args, "delivery_output", None)
+        else run / "delivery"
+    )
     manifest = export_delivery(
         fit=fit,
         sequence=sequence,
-        output=run / "delivery",
+        output=delivery,
         runtime=runtime,
         capture=None,
         runner=None,
         defaults=load_defaults(),
+        args=args,
     )
     print(
         json.dumps(
             {
-                "meshes": _mesh_paths(run / "delivery"),
+                "meshes": _mesh_paths(delivery),
                 "vertices": {state: item["vertices"] for state, item in manifest["mesh"]["states"].items()},
                 "faces": {state: item["faces"] for state, item in manifest["mesh"]["states"].items()},
                 "status": manifest["status"],
@@ -389,6 +435,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_capture_options(run, defaults)
     _add_fit_options(run, defaults)
+    _add_neck_prominence_options(run, defaults)
     run.add_argument("--output", type=Path, help="run directory (default: runtime/outputs/<capture>_reconstruction)")
     run.set_defaults(func=command_run)
 
@@ -410,6 +457,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="accept archives without a per-session calibration record and mark them unverified",
     )
     _add_fit_options(reconstruct, defaults)
+    _add_neck_prominence_options(reconstruct, defaults)
     reconstruct.set_defaults(func=command_reconstruct)
 
     export = sub.add_parser(
@@ -417,6 +465,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="re-export closed + open meshes from a completed run (no refitting)",
     )
     export.add_argument("--run", type=Path, required=True, help="run directory holding reconstruction/dense")
+    export.add_argument(
+        "--delivery-output",
+        type=Path,
+        default=None,
+        help="alternative delivery directory (default: <run>/delivery; never reused)",
+    )
+    _add_neck_prominence_options(export, defaults)
     export.set_defaults(func=command_export)
 
     device = sub.add_parser("device", help="open the camera and report alignment and intrinsics")
