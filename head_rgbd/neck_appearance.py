@@ -335,6 +335,8 @@ def geometry_guards(
     *, rest: np.ndarray, shaped: np.ndarray, faces: np.ndarray, moved: np.ndarray,
 ) -> dict[str, Any]:
     """Runaway guards: no folds, degeneration, slivers or torn edges."""
+    from head_rgbd.mesh_integrity import edge_records
+    _, _, edge_counts, _, edge_balance = edge_records(faces)
     affected = moved[faces].any(axis=1)
     tri_b = rest[faces[affected]]
     tri_a = shaped[faces[affected]]
@@ -352,10 +354,12 @@ def geometry_guards(
     quality = e.max(axis=1) ** 2 / np.maximum(aa, 1e-18)
     eb = np.linalg.norm(tri_b - tri_b[:, [1, 2, 0]], axis=2)
     ea = np.linalg.norm(tri_a - tri_a[:, [1, 2, 0]], axis=2)
-    growth = np.max(ea / np.maximum(eb, 1e-12))
+    growth = np.max(ea / np.maximum(eb, 1e-12)) if len(ea) else 1.0
     # boundary edges (open mesh rim) must keep their vertex ids: tearing shows up
     # as huge edge growth on rim-adjacent faces, covered by the cap below
     return {
+        "inconsistent_shared_edges": int(((edge_counts == 2) & (edge_balance != 0)).sum()),
+        "nonmanifold_edges": int((edge_counts > 2).sum()),
         "affected_faces": int(affected.sum()),
         "degenerate_faces": int((aa < 1e-12).sum()),
         "area_collapse": int(((ratio < 0.05) & np.isfinite(ratio)).sum()),
@@ -371,7 +375,9 @@ def geometry_guards(
 
 def accept_guards(guards: dict[str, Any]) -> bool:
     return (
-        guards["degenerate_faces"] == 0
+        guards.get("inconsistent_shared_edges", 0) == 0
+        and guards.get("nonmanifold_edges", 0) == 0
+        and guards["degenerate_faces"] == 0
         and guards["area_collapse"] == 0
         and guards["normal_reversal"] == 0
         and guards["slender_faces"] == 0

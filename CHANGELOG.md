@@ -1,5 +1,83 @@
 # Changelog
 
+## 0.5.9 - 2026-11-12
+
+Reference-driven laryngeal appearance candidate (NOT the public default; 0.5.6
+fixed design remains the default). Editing mode only: `editing_mode=true`,
+`geometry_source=reference_driven_appearance`,
+`subject_observation_matched=false`.
+
+- New reference this round: `D:/project_neck/runtime/v8_tail_smoke/
+  experiment_20261109-200612/final/identity_rest.obj` (SHA256
+  `2e33411107bd67c5df3ca138294dc798a051bcf66f8dce9835e104d5606077ff`,
+  Y up / +Z anterior / m). The earlier line1/legacy reference is not used and
+  its "no separable ridge" conclusion is not carried over.
+- `head_rgbd/neck_reference_auto.py`: bake the bounded anterior neck field
+  (|x|<50 mm, y in (-125,-81) mm, outer-ring quadratic background, signed
+  residual, C2 gate excluding the under-chin turn above -86 mm and shoulders;
+  peak 4.61 mm at (0,-105) mm, negative extent -3.34 mm, reference neck width
+  127.2 mm; no interpolation gaps filled). No whole-neck maximum localisation.
+- Transport: automatic shared base-topology binding 30 mm below the closed
+  chin (unprotected and front-facing in both states; centre base vertex 16127
+  on this input, not hardcoded), target/reference neck-width scale 1.037,
+  two-level red-green local refinement of the same base faces, and per-state
+  midpoint coordinates, normals, protection distances and frames. The 12 mm
+  C2 protection distance gate is evaluated per state; the open state is not
+  erased by it.
+- Delivered meshes (read back from disk): `runtime/outputs/
+  neck_reference_auto_20261112_172223/final/head_closed_m.obj` and
+  `head_open_m.obj`; 24,494 vertices / 48,856 faces each, boundary 124 (mouth
+  interior + neck bottom preserved), consistent shared-edge winding, no
+  materials. Closed peak 4.77 mm (W50 17.98, L50 12.45, central W10 28.45,
+  global W10 65.14 mm); open 4.67 mm (W50 15.52, L50 10.70, central W10 28.03,
+  global W10 65.21 mm). The 65 mm W10 global bboxes include the two shoulder
+  lobes (peak ~1.5 mm, areas 118-137 mm^2) and are reported as connected
+  components, not hidden by centre-only quoting. Apex local quadratic-fit
+  radius 6.27 mm (closed) / 3.46 mm (open) at a +/-2 mm window, rms 0.006 /
+  0.010 mm; blunt, not a needle.
+- Shape audit (`shape_metrics.json` analysis): level contours, all positive and
+  negative residual components with location/area, midline longitudinal and
+  transverse profiles, and apex curvature are computed on the front-facing
+  sheet only; back-of-neck uv projections are excluded and counted (191
+  closed / 1,697 open). The deformation moved zero backward-facing vertices
+  (new acceptance check). The negative transition moat reaches -3.38 mm and is
+  retained as the reference's broad transition, not zero-filled.
+- Fixed the two-edge green subdivision winding bug in
+  `neck_subject_v3.subdivide_local` (`[m1,c,m2]` -> `[m1,m2,c]`), the cause of
+  the 0.5.8 black facets: 36 inconsistent shared edges per state, zero
+  nonmanifold edges, no new holes. An orientation-only repair of the 0.5.8
+  delivery (vertices untouched, normals recomputed) is written to
+  `old_delivery_orient_fix/` with 12 reversed face IDs per state and
+  `repair_report.json`; historical outputs are kept.
+- Corrected the plateau 10% distance semantics to
+  `sqrt(1-0.1^(1/3)) = 0.7324` in `neck_broad_volume` (both `BroadDesign` and
+  `coordinated_design`); the old 0.93 was wrong.
+- Local self-intersection detector uses a dimensionless Möller segment
+  parameter t in (0,1), strict triangle interior, a dimension-consistent
+  tolerance, separate shared-edge contact and coplanar overlap handling, and
+  reports its local scope (affected edges vs nearby faces); it is not claimed
+  as a whole-head guarantee.
+- Tools: `tools/run_neck_reference_auto.py` (defaults usable without tuning;
+  `--reference`, `--fit-dir`, `--output`, `--strength`) writes the two OBJs,
+  `manifest.json`, `reference_shape.json`, `geometry_verification.json`,
+  `shape_metrics.json`, `run_status.json`, four-way/section/field renders and
+  the report; `tools/make_reference_auto_report.py` builds
+  `docs/NECK_REFERENCE_AUTO_SCULPT_REPORT.html`. All 11 checks passed on this
+  run (exit 0, ~23 s). Regression coverage added in
+  `tests/test_reference_auto.py` (front-sheet exclusion, island reporting,
+  curvature, plus the earlier intersection/scale tests).
+
+## 0.5.8 - 2026-11-12
+
+Broad low-amplitude neck-front volume candidate (NOT the public default; 0.5.6
+stays the default). Delivered under
+`runtime/outputs/neck_broad_volume_20261112_152709/final/`. That delivery was
+later found to carry the green-transition winding defect (36 inconsistent
+shared edges per state) inherited from `subdivide_local`; 0.5.9 fixes the
+source and provides an orientation-only repair, while the historical directory
+is kept unchanged. The design itself is a broad H 2.0-3.0 mm volume with
+W10 30-40 / L10 24-36 mm candidates and no narrow Gaussian spike.
+
 ## 0.5.7 - 2026-11-12
 
 Proportional sculpt candidate (NOT the public default; 0.5.6 fixed design stays

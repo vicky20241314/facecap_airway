@@ -537,6 +537,31 @@ OSQP 迭代）。要再压缩需要改 QP 的缩放/条件数，本轮未做，�
 
 `0.5.7`。`VERSION`、`--version`、`README`、`manifest.json` 四处一致。
 
+0.5.9 新增**参考驱动自动喉结外观**候选（独立脚本，不改变公共默认；`VERSION` 仍为 0.5.7）：
+
+```powershell
+$env:PYTHONPATH = "D:\proiect\facecap_airway_delivery"
+.\runtime\env\python.exe tools\run_neck_reference_auto.py `
+  --reference D:\project_neck\runtime\v8_tail_smoke\experiment_20261109-200612\final\identity_rest.obj `
+  --output runtime\outputs\neck_reference_auto_20261112_172223
+```
+
+从指定的静止参考提取有符号颈前场（外环二次背景、C2 门控、峰值 4.61 mm），按目标/参考颈宽
+（1.037）缩放，自动绑定到闭口颏下 30 mm 的共享基顶点（本次为 16127，自动选取而非硬编码），
+两状态各自坐标与保护距离，输出
+`runtime/outputs/neck_reference_auto_20261112_172223/final/head_closed_m.obj` 与
+`head_open_m.obj`（24,494 顶点 / 48,856 面，边界与基线一致、无材质）。
+闭口峰值 4.77 mm、W50 17.98 mm；张口 4.67 mm、W50 15.52 mm；连通域、外围肩部残差、
+中线剖面与尖端圆钝（±2 mm 局部拟合半径 6.27 / 3.46 mm）在
+[NECK_REFERENCE_AUTO_SCULPT_REPORT.html](docs/NECK_REFERENCE_AUTO_SCULPT_REPORT.html)
+与 `shape_metrics.json` 中完整列出。该模式标记 `editing_mode=true`、
+`geometry_source=reference_driven_appearance`、`subject_observation_matched=false`。
+**公共默认仍为 0.5.6**，本轮独立脚本成功不代表所有入口已切换。
+
+0.5.8 为宽缓低幅颈前体量候选（`runtime/outputs/neck_broad_volume_20261112_152709/`），
+其交付曾发现绿色过渡三角形绕序缺陷；0.5.9 修复源并给出仅重排面、零顶点位移的
+`old_delivery_orient_fix/` 对照，历史输出保留，默认未切换。
+
 0.5.7 新增比例驱动的喉结塑形候选（`head_rgbd/neck_proportional.py`）：从未塑形网格测量
 W_head/W_neck/L_neck，按比例推导尺寸与归一化位置（s 扫描两态保护净距），纵包络可选 C2 平台。
 本模板上 H/W_neck 与 L10/L_neck 达标，但 W10/W_neck 与成品 L50/W50 未达项目偏好，

@@ -1087,7 +1087,7 @@ def subdivide_local(
                 new_faces.extend([[a, b, m1], [a, m1, m2], [m2, m1, c]])
             else:
                 m1, m2 = midpoint(c, a), midpoint(a, b)
-                new_faces.extend([[a, m2, m1], [m2, b, c], [m1, c, m2]])
+                new_faces.extend([[a, m2, m1], [m2, b, c], [m1, m2, c]])
             parent_faces.extend([fid, fid, fid])
         else:
             new_faces.append([int(v) for v in f])

@@ -33,6 +33,7 @@ from head_rgbd import neck_subject_v3 as v3
 
 NECK_METHOD_BROAD = "manual_broad_volume_appearance_sculpt"
 GEOMETRY_SOURCE_BROAD = "reference_inspired_appearance"
+TEN_PERCENT_RADIUS = float(np.sqrt(1.0 - 0.1 ** (1.0 / 3.0)))
 
 # Design starting points for this template: appearance parameters only.
 CANDIDATES: dict[str, dict[str, float]] = {
@@ -50,12 +51,11 @@ class BroadDesign:
 
     @property
     def half_u_mm(self) -> float:
-        # for (1-x^2)^3 the 10% level sits at x ≈ 0.93 -> support ≈ width10/0.93
-        return 0.5 * self.width10_mm / 0.93
+        return 0.5 * self.width10_mm / TEN_PERCENT_RADIUS
 
     @property
     def half_v_mm(self) -> float:
-        return 0.5 * self.length10_mm / 0.93
+        return 0.5 * self.length10_mm / TEN_PERCENT_RADIUS
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -89,7 +89,7 @@ def coordinated_design(scale, height_mm: float, width10_mm: float,
     L = scale.L_neck_mm
     space_up = scale.centre_s * L - min_gap_mm
     space_dn = (1.0 - scale.centre_s) * L - min_gap_mm
-    half_v = 0.5 * length10_mm / 0.93
+    half_v = 0.5 * length10_mm / TEN_PERCENT_RADIUS
     fit = min(1.0, space_up / half_v if half_v > 0 else 1.0,
               space_dn / half_v if half_v > 0 else 1.0)
     design = BroadDesign(height_mm=height_mm * fit,
