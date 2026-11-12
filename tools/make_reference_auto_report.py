@@ -41,6 +41,13 @@ def write_report(out: Path, *, summary: dict, timing) -> Path:
         f"<figure><img style='width:46%' src='{img(out / 'render' / f'{s}_section_{k}.png')}'/>"
         f"<figcaption>{s}：{'纵向' if k == 'long' else '横向'}剖面（磁盘 OBJ 面片∩平面）</figcaption></figure>"
         for s in ("closed", "open") for k in ("long", "cross"))
+    sensitivity = summary.get("reference", {}).get("background_sensitivity", {})
+    sens_rows = "".join(
+        f"<tr><td>{v['setting']}</td><td>{v['background_order']}</td><td>{v['outer_ring']}</td>"
+        f"<td>{v['peak_mm']:.2f}</td><td>{v['peak_xy_mm']}</td><td>{v['width50_mm']}</td>"
+        f"<td>{v['length50_mm']}</td><td>{v['correlation_core']}</td>"
+        f"<td>{v['max_abs_diff_core_mm']}</td></tr>"
+        for v in sensitivity.get("variants", []))
     gv = json.loads((out / "geometry_verification.json").read_text(encoding="utf-8"))
     facial_row = "；".join(
         f"{s} 命中 {gv['states'][s]['facial_first_hit']['protected_face_hits']} 条，"
@@ -183,6 +190,12 @@ L50 {level_cell('open','0.5','l')} mm、L10 {level_cell('open','0.1','l')} mm。
 <tr><td>参考颈宽 / 目标缩放</td><td>{json.loads((out/'reference_shape.json').read_text(encoding='utf-8'))['reference_neck_width_mm']:.1f} mm · scale {summary['scale']:.3f}</td></tr>
 <tr><td>排除区域</td><td>颏下反折（y&gt;−86 mm）、肩部、所有后侧表面；有效域内无空洞（插值前已校验）</td></tr>
 </table>
+<h3 style="font-size:14px;color:#aab7c8">背景设置敏感性（诊断；交付场始终为外环二次主设置）</h3>
+<table><tr><th>设置</th><th>阶次</th><th>外环</th><th>峰值 (mm)</th><th>峰位 (x,y) mm</th>
+<th>W50 (mm)</th><th>L50 (mm)</th><th>核心相关</th><th>核心最大差 (mm)</th></tr>{sens_rows}</table>
+<p style="color:#8a97a8">核心域 {sensitivity.get('core', '')}；相关与最大差均相对主设置。三种设置的峰位一致（均为 (0,−105) mm），
+核心相关 0.958–0.996；峰值在 4.53–6.38 mm 之间随背景阶次/外环宽度变化，说明<b>位置与形态稳定、幅值对背景设置有依赖</b>。
+交付网格使用主设置（4.61 mm），幅值范围作为局限记录，未用变体调高或调低成品高度。</p>
 
 <h2>2. 形态度量、外围残差与尖端圆钝审计</h2>
 <table><tr><th>状态</th><th>峰值 H (mm)</th><th>W50 中心/全局 (mm)</th><th>L50 中心/全局 (mm)</th>
@@ -218,6 +231,7 @@ L50 {level_cell('open','0.5','l')} mm、L10 {level_cell('open','0.1','l')} mm。
 <h2>6. 权重与局限</h2>
 <div class="warn"><ul>
 <li>参考峰值 {masset:.2f} mm 是参考外观位移，不是人体真实喉结高度；缩放 {summary['scale']:.3f} 为颈部宽度比。</li>
+<li>背景设置敏感性：峰位稳定，峰值在 4.53–6.38 mm（二次/三次/更宽外环）之间；交付采用主设置，未对窄支撑做任意高度补偿。</li>
 <li>W10/L10 的“全局包围”包含肩部与宽缓过渡；“中心连通”只含峰值所在连通域，两者并列给出，连通域清单未被裁剪。</li>
 <li>尖端半径是应用高度场的局部二次拟合（2/3/4 mm 窗口），不是解剖测量；窗口间变化见上表。</li>
 <li>自交检测为局部受影响面范围，不是整头穷举保证。</li>

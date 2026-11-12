@@ -17,6 +17,11 @@ fixed design remains the default). Editing mode only: `editing_mode=true`,
   residual, C2 gate excluding the under-chin turn above -86 mm and shoulders;
   peak 4.61 mm at (0,-105) mm, negative extent -3.34 mm, reference neck width
   127.2 mm; no interpolation gaps filled). No whole-neck maximum localisation.
+- Background sensitivity (diagnostic; the delivered field keeps the primary
+  outer-ring quadratic): an outer-ring cubic and a wider-ring quadratic give
+  the same peak location (0,-105) mm and core correlations 0.958/0.996, while
+  the peak amplitude spans 4.53-6.38 mm. The delivered 4.61 mm is not adjusted;
+  the range is recorded as a limitation in the report.
 - Transport: automatic shared base-topology binding 30 mm below the closed
   chin (unprotected and front-facing in both states; centre base vertex 16127
   on this input, not hardcoded), target/reference neck-width scale 1.037,

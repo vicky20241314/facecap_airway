@@ -435,3 +435,82 @@ def analyse_applied(state, faces, *, residual_threshold_mm=.05):
                   "3D triangle area summed inside each component (conservative); profiles by "
                   "linear interpolation; apex radius from a local quadratic height fit.",
     }
+
+
+def background_sensitivity(path, *, centre_y_mm=-105.5):
+    """Diagnose whether the extracted peak depends on the background setting.
+
+    The delivered field uses the outer-ring quadratic.  Two alternatives are
+    evaluated on the same ROI and gate: an outer-ring cubic and a quadratic on
+    a wider outer ring.  This function only reports sensitivity; it does not
+    change the delivered field or mesh.
+    """
+    path = Path(path)
+    vertices, faces = load_obj(path)
+    points = vertices * 1000.
+    normals = prominence.vertex_normals(vertices, faces)
+    select = ((normals[:, 2] > .15) & (np.abs(points[:, 0]) < 50.)
+              & (points[:, 1] > -140.) & (points[:, 1] < -70.))
+    interp = LinearNDInterpolator(points[select, :2], points[select, 2])
+    x = np.linspace(-34., 34., 137)
+    y = np.linspace(-125., -81., 89)
+    X, Y = np.meshgrid(x, y)
+    Z = interp(X, Y)
+    if not np.isfinite(Z).all():
+        raise ValueError("reference anterior ROI has missing observations")
+    U, Q = X / 34., (Y + 103.) / 22.
+    gate = (smooth_gate((34. - np.abs(X)) / 9.)
+            * smooth_gate((Y + 125.) / 9.)
+            * smooth_gate((-86. - Y) / 9.))
+    core = (np.abs(X) < 20.) & (Y > -116.) & (Y < -94.)
+    variants = []
+    reference_core = None
+    for name, order, outer in (
+            ("outer_quadratic_used", 2, (np.abs(U) > .72) | (np.abs(Q) > .77)),
+            ("outer_cubic", 3, (np.abs(U) > .72) | (np.abs(Q) > .77)),
+            ("outer_quadratic_wider_ring", 2, (np.abs(U) > .62) | (np.abs(Q) > .67))):
+        if order == 2:
+            basis = np.stack([np.ones_like(X), U, Q, U*U, U*Q, Q*Q], axis=-1)
+        else:
+            basis = np.stack([np.ones_like(X), U, Q, U*U, U*Q, Q*Q,
+                              U**3, U*U*Q, U*Q*Q, Q**3], axis=-1)
+        coef = np.linalg.lstsq(basis[outer], Z[outer], rcond=None)[0]
+        field = gaussian_filter(Z - basis @ coef, sigma=1.0) * gate
+        peak_index = np.unravel_index(np.argmax(np.where(core, field, -np.inf)), field.shape)
+        peak = float(field[peak_index])
+        row = field[peak_index[0]]
+        take = np.flatnonzero(row >= peak*.5)
+        lo = take[take <= peak_index[1]]
+        hi = take[take >= peak_index[1]]
+        width = float(x[hi.max()] - x[lo.min()]) if len(lo) and len(hi) else None
+        column = field[:, peak_index[1]]
+        rows = np.flatnonzero(column >= peak*.5)
+        lo_v = rows[rows <= peak_index[0]]
+        hi_v = rows[rows >= peak_index[0]]
+        length = float(y[hi_v.max()] - y[lo_v.min()]) if len(lo_v) and len(hi_v) else None
+        if reference_core is None:
+            reference_core = field[core]
+            correlation = 1.
+            max_diff = 0.
+        else:
+            correlation = float(np.corrcoef(reference_core, field[core])[0, 1])
+            max_diff = float(np.max(np.abs(field[core] - reference_core)))
+        variants.append({
+            "setting": name, "background_order": order,
+            "outer_ring": "|U|>0.72 or |Q|>0.77" if "wider" not in name
+                          else "|U|>0.62 or |Q|>0.67",
+            "peak_mm": round(peak, 3),
+            "peak_xy_mm": [round(float(X[peak_index]), 2), round(float(Y[peak_index]), 2)],
+            "negative_extent_mm": round(float(field.min()), 3),
+            "width50_mm": None if width is None else round(width, 2),
+            "length50_mm": None if length is None else round(length, 2),
+            "correlation_core": round(correlation, 5),
+            "max_abs_diff_core_mm": round(max_diff, 3),
+        })
+    return {
+        "primary": "outer_quadratic_used",
+        "note": "diagnostic only; the delivered field and mesh always use the primary "
+                "outer-ring quadratic setting",
+        "core": "|x|<20 mm, y in (-116,-94) mm",
+        "variants": variants,
+    }

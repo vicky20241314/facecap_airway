@@ -149,6 +149,7 @@ def main(argv=None) -> int:
         # ---------- 1. extract the reference field ----------
         t0 = time.perf_counter()
         asset, ref_V, ref_F = nra.extract_reference(args.reference)
+        asset["background_sensitivity"] = nra.background_sensitivity(args.reference)
         timing.append({"stage": "reference_extract", "seconds": round(time.perf_counter() - t0, 3)})
         (out / "reference_shape.json").write_text(
             json.dumps(asset, indent=1, ensure_ascii=False), encoding="utf-8")
@@ -301,6 +302,7 @@ def main(argv=None) -> int:
                 "core_peak_xy_mm": asset["core_peak_xy_mm"],
                 "reference_neck_width_mm": asset["reference_neck_width_mm"],
                 "negative_extent_mm": asset["negative_extent_mm"],
+                "background_sensitivity": asset["background_sensitivity"],
                 "method": asset["method"], "excluded": asset["excluded"],
             },
             "transfer": {
@@ -418,6 +420,7 @@ def main(argv=None) -> int:
                 "peak_xy_mm": asset["core_peak_xy_mm"],
                 "negative_extent_mm": asset["negative_extent_mm"],
                 "reference_neck_width_mm": asset["reference_neck_width_mm"],
+                "background_sensitivity": asset["background_sensitivity"],
             },
             "analysis": analysis,
             "metrics": {s: plan["states"][s]["metrics"] for s in ("closed", "open")},
