@@ -34,3 +34,18 @@ def test_orientation_repair_preserves_vertices_and_boundary():
     assert record["reversed_faces"] == 1
     assert topology_report(vertices, repaired)["inconsistent_shared_edges"] == 0
     assert topology_report(vertices, repaired)["boundary_edges"] == 4
+
+
+def test_geometry_guard_status_is_the_boolean_verdict():
+    from head_rgbd.neck_appearance import geometry_guards, accept_guards
+    vertices = np.array([[0., 0., 0.], [1., 0., 0.], [1., 1., 0.], [0., 1., 0.]])
+    good = geometry_guards(
+        rest=vertices, shaped=vertices,
+        faces=np.array([[0, 1, 2], [0, 2, 3]]), moved=np.zeros(4, bool))
+    assert good["status"] == "passed" and accept_guards(good)
+    bad = geometry_guards(
+        rest=vertices, shaped=vertices,
+        faces=np.array([[0, 1, 2], [0, 3, 2]]), moved=np.zeros(4, bool))
+    assert bad["inconsistent_shared_edges"] > 0
+    assert bad["status"] == "failed"
+    assert not accept_guards(bad)

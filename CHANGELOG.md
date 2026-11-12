@@ -1,5 +1,79 @@
 # Changelog
 
+## 0.6.0 - 2026-11-12
+
+Continuous non-negative reference-driven laryngeal appearance; **this is now the
+public default** (`neck_prominence.algorithm = continuous_reference`).
+
+- New production module `head_rgbd/neck_continuous.py`. The reference
+  (`D:/project_neck/runtime/v8_tail_smoke/experiment_20261109-200612/final/
+  identity_rest.obj`, SHA256 `2e33411107bd67c5df3ca138294dc798a051bcf66f8dce9835e104d5606077ff`,
+  Y up / +Z anterior / m) contributes only positive-lobe proportions: H 4.613 mm,
+  W50/L50 17.50/12.00 mm, 10% up/down 10.00/8.50 mm, apex radius ~6.56 mm, and
+  the 50%/10% lateral/vertical fits. The negative background residual, side
+  grooves, and the separate 1.55-1.57 mm shoulder islands are recorded but never
+  transported. A cubic/wider-ring background sensitivity spans 4.53-6.38 mm;
+  the delivered field uses the primary setting and is not height-compensated.
+- The target receives one analytic non-negative C2 bump (plateau vertical
+  envelope, rounded-V lateral section with a finite tip) fitted to the reference
+  profiles. It is applied along a low-frequency smoothed outward direction field
+  (frame-normal/surface-normal blend alpha=0.55); tangential drag drops from
+  0.81/0.70 mm (constant) to 0.65/0.56 mm (smooth). The unshaped baseline is
+  the only base: relative normal displacement is >= 0 (minimum 0.000 mm,
+  tolerance -0.05 mm), negative face area is 0 mm^2, and no new ring/groove is
+  present (radial monotonicity violations 0, single 10%/50% component, negative
+  residual components 0).
+- Placement is proportional, not the old chin-30 mm rule: the closed neck is
+  measured submental-crease to neck-root (W_neck 121.08 mm, L_neck 42.0 mm;
+  38/46 mm per state), the reference relative position s_ref=0.545 is mapped,
+  and the full support is fitted by coordinated scaling q=0.952 x f=0.92
+  (height/width/length/tip together). The chosen centre is s=0.625, bound to
+  base vertex 15571 by position (not a fixed id), with 10% contour clearances
+  31.89 mm (closed) / 8.64 mm (open), support gate 1.0, and one shared base
+  binding with per-state vertices, midpoints, normals and protection distances.
+- Delivered meshes: `runtime/outputs/neck_continuous_fix_20261112_190000/
+  final/head_closed_m.obj` and `head_open_m.obj`; 20,798 vertices / 41,464
+  faces each, boundary 124 (mouth interior + neck bottom preserved), consistent
+  winding, no materials, disk read-back <=5e-11 m. Closed/open peaks 4.037/
+  4.037 mm, central W50/L50 14.94/10.60 and 14.11/10.13 mm. All 26 acceptance
+  checks pass (including facial first hits classified by original baseline face
+  indices: 3e-5/2e-5 mm, protected vertices moved 0, no backward-facing moved
+  vertices, local self-intersections 0, unit/read-back checks).
+- Causal A/B/C: A (0.5.9 signed residual) has min -2.02/-1.37 mm and negative
+  area 2330/1466 mm^2 (the pit); B (same old centre/scale, non-negative field)
+  removes the inward displacement but its open 10% support is only 3.23 mm from
+  protection (unsafe); C is the proportional/coordinated final. The unshaped
+  closed base has no local pit (midline chord deviation -1.49...+0.80 mm over the
+  support window; open -2.24...0.00 mm natural curve), so no base repair is
+  applied and no base/normal repair displacement is mixed into the sculpt.
+- `geometry_guards` now returns the actual boolean verdict in `status`
+  (`passed`/`failed`); `accept_guards` and the pipeline use the boolean, so a
+  flipped/non-manifold mesh can no longer be exported via a stale status string.
+  Regression tests cover the failing status; the local self-intersection
+  detector remains the single dimensionless-t, coplanar-aware detector.
+- Public entry switched and verified end to end: `config/defaults.json`
+  algorithm/reference/alpha, CLI `--neck-algorithm continuous_reference`,
+  `--neck-reference`, `--neck-alpha`, the pipeline `export_delivery` branch, and
+  manifest/neck_prominence editing flags agree. `headrgbd.cmd --version` prints
+  0.6.0; `headrgbd.cmd export --run ... --delivery-output
+  runtime/outputs/public_neck_continuous_060_wrapper` produced the same faces
+  and vertices within 5e-9 m of the independent tool. The public manifest status
+  is `degraded` only because of the pre-existing open inner-lip depth-prior
+  warning (the baseline manifest has the same warning); the neck stage is
+  `applied`. Observation-only amplitude/radius fields are nulled in the
+  continuous manifest. If the reference is missing or the support/guard audit
+  fails, the entry exports the unshaped baseline with a recorded `skipped`
+  reason; it never falls back to the old pitted manual design.
+- Tools/report: `tools/run_neck_continuous_fix.py` (actual A/B/C meshes, disk
+  verification, 28 renders including four-way full-head views, neck close-ups
+  flat+smooth, sections with inward-check difference, heatmaps, transition
+  wireframes) and `tools/make_neck_continuous_report.py`;
+  `docs/NECK_CONTINUOUS_APPEARANCE_FIX_REPORT.html` answers the eight questions
+  and records the public switch (`public_switch.json`). Tests: 237 passed,
+  2 skipped; the only 5 failures are the known `.ps1` launcher tests on this
+  host (no `pwsh.exe`). Historical outputs and the 0.5.9/0.5.8 candidates are
+  kept unchanged.
+
 ## 0.5.9 - 2026-11-12
 
 Reference-driven laryngeal appearance candidate (NOT the public default; 0.5.6

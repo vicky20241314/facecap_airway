@@ -331,6 +331,18 @@ def realized_metrics(
     return out
 
 
+def _guard_passes(guards: dict[str, Any]) -> bool:
+    return (
+        guards.get("inconsistent_shared_edges", 0) == 0
+        and guards.get("nonmanifold_edges", 0) == 0
+        and guards.get("degenerate_faces", 0) == 0
+        and guards.get("area_collapse", 0) == 0
+        and guards.get("normal_reversal", 0) == 0
+        and guards.get("slender_faces", 0) == 0
+        and guards.get("max_edge_growth", 0.0) <= EDGE_GROWTH_CAP
+    )
+
+
 def geometry_guards(
     *, rest: np.ndarray, shaped: np.ndarray, faces: np.ndarray, moved: np.ndarray,
 ) -> dict[str, Any]:
@@ -357,7 +369,7 @@ def geometry_guards(
     growth = np.max(ea / np.maximum(eb, 1e-12)) if len(ea) else 1.0
     # boundary edges (open mesh rim) must keep their vertex ids: tearing shows up
     # as huge edge growth on rim-adjacent faces, covered by the cap below
-    return {
+    result = {
         "inconsistent_shared_edges": int(((edge_counts == 2) & (edge_balance != 0)).sum()),
         "nonmanifold_edges": int((edge_counts > 2).sum()),
         "affected_faces": int(affected.sum()),
@@ -369,20 +381,13 @@ def geometry_guards(
         "max_edge_growth": round(float(growth), 3),
         "edge_growth_cap": EDGE_GROWTH_CAP,
         "preexisting_degenerate_rest_faces": int(preexisting.sum()),
-        "status": "passed",
     }
+    result["status"] = "passed" if _guard_passes(result) else "failed"
+    return result
 
 
 def accept_guards(guards: dict[str, Any]) -> bool:
-    return (
-        guards.get("inconsistent_shared_edges", 0) == 0
-        and guards.get("nonmanifold_edges", 0) == 0
-        and guards["degenerate_faces"] == 0
-        and guards["area_collapse"] == 0
-        and guards["normal_reversal"] == 0
-        and guards["slender_faces"] == 0
-        and guards["max_edge_growth"] <= EDGE_GROWTH_CAP
-    )
+    return _guard_passes(guards)
 
 
 # ---------------------------------------------------------------------------

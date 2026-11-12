@@ -532,6 +532,39 @@ def export_delivery(
                 sculpt_error = f"{type(error).__name__}: {error}"
         else:
             sculpt_error = f"sculpt_disabled:{gate_reason}"
+    continuous_plan = None
+    continuous_error = None
+    if algorithm == "continuous_reference":
+        import numpy as _np
+        from head_rgbd import neck_continuous as ncont
+        reference_path = (getattr(args, "neck_reference", None)
+                          or (defaults.get("neck_prominence") or {}).get("reference_path"))
+        alpha = float(getattr(args, "neck_alpha", None)
+                      or (defaults.get("neck_prominence") or {}).get("alpha", ncont.DEFAULT_ALPHA))
+        try:
+            with _np.load(fit / "parameters.npz", allow_pickle=False) as stored:
+                dense_v, dense_f = stored["dense_vertices"], stored["dense_faces"]
+        except FileNotFoundError:
+            dense_v = dense_f = None
+        if reference_path is None:
+            continuous_error = "reference_path_missing"
+        elif not Path(reference_path).is_file():
+            continuous_error = f"reference_missing:{reference_path}"
+        elif dense_v is None:
+            continuous_error = "parameters_npz_missing"
+        else:
+            try:
+                continuous_plan = ncont.build_states(
+                    states=states, references=references["references"],
+                    dense_vertices=dense_v, dense_faces=dense_f,
+                    reference_path=reference_path, alpha=alpha,
+                    direction_modes=("constant", "smooth"))
+                if not continuous_plan.get("accepted"):
+                    continuous_error = "continuous_support_or_guard_failed"
+                else:
+                    sculpt_plan = continuous_plan
+            except Exception as error:  # never block the export on the appearance stage
+                continuous_error = f"{type(error).__name__}: {error}"
     for state in states:
         reference = references["references"][state]
         if stage not in reference.get("stages", {}):
@@ -598,7 +631,7 @@ def export_delivery(
                         "background_available": item["background_available"],
                         "background": (item["background"].residual_stats if item["background"] is not None else None),
                         "support": {"vertices": int(item["support"].sum())},
-                        "status": "applied" if (guards["status"] == "passed"
+                        "status": "applied" if (na.accept_guards(guards)
                                                 and item["self_intersections"]["count"] == 0
                                                 and item["protection_check"]["protected_vertices_moved"] == 0)
                                   else "skipped",
@@ -621,6 +654,62 @@ def export_delivery(
                         "effective_enabled": False, "status": "skipped",
                         "reason": sculpt_error or "sculpt_unavailable",
                         "safety_fallback": "not_applied",
+                    }
+                    shaped_vertices = None
+                    export_faces = None
+            elif algorithm == "continuous_reference":
+                if continuous_plan is not None and continuous_plan.get("accepted"):
+                    c_item = continuous_plan["states"][state]
+                    c_audit = continuous_plan["audits"][state]
+                    shaped_vertices = c_item["run"]["vertices"]
+                    export_faces = continuous_plan["faces"]
+                    prominence_report = {
+                        "state": state,
+                        "neck_method": ncont.NECK_METHOD_CONTINUOUS,
+                        "geometry_source": ncont.GEOMETRY_SOURCE_CONTINUOUS,
+                        "editing_mode": True,
+                        "subject_observation_matched": False,
+                        "effective_enabled": True,
+                        "position_source": continuous_plan["placement"].get("source"),
+                        "position_audit": continuous_plan["placement"],
+                        "reference": {"path": str(reference_path),
+                                      "sha256": continuous_plan["reference_morphology"]["source_sha256"],
+                                      "used_for_shape_only": True},
+                        "design": continuous_plan["design_audit"],
+                        "requested_height_mm": continuous_plan["design_audit"]["height_mm"],
+                        "realized_height_mm": c_audit["applied_peak_mm"],
+                        "direction": continuous_plan["direction_mode"],
+                        "direction_alpha": continuous_plan["alpha"],
+                        "guards": c_item["guards"],
+                        "self_intersections": {
+                            "count": c_item["intersections"]["count"],
+                            "segments": c_item["intersections"].get("affected_edges"),
+                            "candidate_faces": c_item["intersections"].get("candidate_tests")},
+                        "protected_vertices_moved": int(
+                            (_np.abs(c_item["run"]["applied_mm"][c_item["protected"]]) > 1e-9).sum()),
+                        "support": c_audit["support"],
+                        "levels": {k: {"component_count": v["component_count"]}
+                                   for k, v in c_audit["levels"].items()},
+                        "base_relative": c_audit["base_relative"],
+                        "status": "applied" if (
+                            ncont.na.accept_guards(c_item["guards"])
+                            and c_item["intersections"]["count"] == 0
+                            and c_audit["support"]["inside_protected"] == 0) else "skipped",
+                        "reason": None,
+                    }
+                    if prominence_report["status"] != "applied":
+                        prominence_report["reason"] = "continuous_guard_failed"
+                        prominence_report["safety_fallback"] = "geometry_guard_failed_keep_baseline"
+                        shaped_vertices = None
+                        export_faces = None
+                else:
+                    prominence_report = {
+                        "state": state, "neck_method": "continuous_reference_appearance",
+                        "geometry_source": "reference_driven_appearance",
+                        "editing_mode": True, "subject_observation_matched": False,
+                        "effective_enabled": False, "status": "skipped",
+                        "reason": continuous_error or "continuous_unavailable",
+                        "safety_fallback": "not_applied_keep_baseline",
                     }
                     shaped_vertices = None
                     export_faces = None
@@ -652,15 +741,19 @@ def export_delivery(
             export_faces = None
             from head_rgbd import neck_appearance as na_mod
             legacy_sculpt = algorithm == "manual_edit"
+            legacy_continuous = algorithm == "continuous_reference"
             prominence_reports[state] = {
                 "state": state,
                 "status": npn.STATUS_SKIPPED,
                 "reason": "legacy_mesh_storage_shaping_unsupported",
                 "effective_enabled": False,
-                "editing_mode": legacy_sculpt,
-                "neck_method": na_mod.NECK_METHOD_SCULPT if legacy_sculpt else npn.NECK_METHOD,
-                "geometry_source": na_mod.GEOMETRY_SOURCE_SCULPT if legacy_sculpt else npn.GEOMETRY_SOURCE,
-                "subject_observation_matched": False if legacy_sculpt else None,
+                "editing_mode": legacy_sculpt or legacy_continuous,
+                "neck_method": ("continuous_reference_appearance" if legacy_continuous
+                                else (na_mod.NECK_METHOD_SCULPT if legacy_sculpt else npn.NECK_METHOD)),
+                "geometry_source": ("reference_driven_appearance" if legacy_continuous
+                                    else (na_mod.GEOMETRY_SOURCE_SCULPT if legacy_sculpt else npn.GEOMETRY_SOURCE)),
+                "subject_observation_matched": False if (legacy_sculpt or legacy_continuous) else None,
+                "safety_fallback": "legacy_mesh_storage_not_reshaped",
             }
             shutil.copy2(fit / stage_reference['mesh'], final_mesh)
         geometries[state] = mesh_checks(
@@ -788,6 +881,7 @@ def export_delivery(
                     "subject_observation_matched", "preset", "design", "position_source",
                     "position_audit", "requested_height_mm", "realized_height_mm",
                     "width_mm", "length_mm", "tip_rounding_mm", "transition_lengths_mm",
+                    "direction", "direction_alpha", "support", "levels", "base_relative",
                     "safety_fallback", "guards", "protected_vertices_moved",
                     "refined_local_topology", "background_available",
                     "moved_vertices", "max_displacement_mm", "ridge_parameters",
@@ -811,6 +905,15 @@ def export_delivery(
             "reconstruction, performs no per-point neck fitting and does not restore measured neck geometry"
         ),
     }
+    if neck_prominence_payload.get("neck_algorithm") != "observation":
+        for key in ("requested_final_prominence_mm", "candidate_final_prominence_mm",
+                    "requested_radius_x_mm", "requested_radius_y_mm",
+                    "requested_base_radius_x_mm", "requested_base_radius_y_mm",
+                    "requested_base_share"):
+            neck_prominence_payload[key] = None
+        neck_prominence_payload["observation_parameter_note"] = (
+            "the amplitude/radius fields are observation-only; they are not used by "
+            "continuous_reference or manual_edit and are nulled here for consistency")
     write_json_exclusive(output / "neck_prominence.json", neck_prominence_payload)
 
     warnings = _quality_warnings(fit_report, sequence_info, support)

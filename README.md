@@ -535,9 +535,23 @@ OSQP 迭代）。要再压缩需要改 QP 的缩放/条件数，本轮未做，�
 
 ## 10. 版本
 
-`0.5.7`。`VERSION`、`--version`、`README`、`manifest.json` 四处一致。
+`0.6.0`。`VERSION`、`--version`、`README`、`manifest.json` 四处一致。
 
-0.5.9 新增**参考驱动自动喉结外观**候选（独立脚本，不改变公共默认；`VERSION` 仍为 0.5.7）：
+0.6.0 起公共默认的颈前阶段是**连续非负参考外观**（`neck_prominence.algorithm=continuous_reference`）：
+`config/defaults.json` 指定参考 `D:/project_neck/runtime/v8_tail_smoke/experiment_20261109-200612/final/identity_rest.obj`
+（SHA256 `2e334111…5606077ff`）；`head_rgbd/neck_continuous.py` 只取参考中心正叶的
+高度/宽度/长度/上下过渡/尖端圆钝比例，在闭口颏下-颈底可靠颈段内做比例定位
+（s_ref=0.545 → 本次 s=0.625，自动绑定基顶点 15571），整体协调缩放 q=0.952 · f=0.92，
+生成单一非负 C2 单峰并沿低频平滑外向方向场叠加。参考负残差、侧沟和外围肩部岛不迁移；
+两状态共享基拓扑、各自顶点/中点/法向/保护距离。本次闭/张峰值 4.04/4.04 mm，
+中心 W50/L50 14.94/10.60 与 14.11/10.13 mm；相对未塑形基线法向最小 0.000 mm、负面积 0 mm²，
+10% 支撑保护净距 31.89/8.64 mm，26/26 验收通过。公开入口 `headrgbd.cmd export` 已用同一实现验证，
+交付与报告见 [NECK_CONTINUOUS_APPEARANCE_FIX_REPORT.html](docs/NECK_CONTINUOUS_APPEARANCE_FIX_REPORT.html)。
+若参考缺失或支撑/几何验收失败，入口**回退到未塑形基线并记录 skipped**，绝不回到带坑的旧方案；
+`manual_edit` / `observation` 仅保留为 `--neck-algorithm` 历史/研究路径。
+公开 manifest 的 `degraded` 来自既有的张口内唇深度先验警告（基线同样存在），不是颈部失败。
+
+0.5.9 是历史候选（有符号残差方案，已确认会产生负环/凹坑）；0.6.0 不再默认。其独立脚本与记录保留：
 
 ```powershell
 $env:PYTHONPATH = "D:\proiect\facecap_airway_delivery"
@@ -556,7 +570,7 @@ $env:PYTHONPATH = "D:\proiect\facecap_airway_delivery"
 [NECK_REFERENCE_AUTO_SCULPT_REPORT.html](docs/NECK_REFERENCE_AUTO_SCULPT_REPORT.html)
 与 `shape_metrics.json` 中完整列出。该模式标记 `editing_mode=true`、
 `geometry_source=reference_driven_appearance`、`subject_observation_matched=false`。
-**公共默认仍为 0.5.6**，本轮独立脚本成功不代表所有入口已切换。
+0.5.9 当时独立运行成功，但公共默认仍为 0.5.6；0.6.0 已切换到连续非负方案，旧候选保留为历史。
 
 0.5.8 为宽缓低幅颈前体量候选（`runtime/outputs/neck_broad_volume_20261112_152709/`），
 其交付曾发现绿色过渡三角形绕序缺陷；0.5.9 修复源并给出仅重排面、零顶点位移的
@@ -565,11 +579,11 @@ $env:PYTHONPATH = "D:\proiect\facecap_airway_delivery"
 0.5.7 新增比例驱动的喉结塑形候选（`head_rgbd/neck_proportional.py`）：从未塑形网格测量
 W_head/W_neck/L_neck，按比例推导尺寸与归一化位置（s 扫描两态保护净距），纵包络可选 C2 平台。
 本模板上 H/W_neck 与 L10/L_neck 达标，但 W10/W_neck 与成品 L50/W50 未达项目偏好，
-因此**默认入口仍为 0.5.6 固定设计**，阻断项与 A/B 见
+当时默认入口仍为 0.5.6 固定设计（0.6.0 已切换到连续非负方案），阻断项与 A/B 见
 [NECK_PROPORTIONAL_SCULPT_REPORT.html](docs/NECK_PROPORTIONAL_SCULPT_REPORT.html)。
 
-0.5.6 的默认颈部阶段是**人工设计的喉结外观塑形**（`manual_edit`）：单一连续圆钝纵脊解析场，
-预设 light 3 mm / natural 5 mm（默认）/ pronounced 7 mm；标记 `editing_mode=true`、
+0.5.6 曾是默认颈部阶段的**人工设计的喉结外观塑形**（`manual_edit`；0.6.0 起仅保留为历史/兼容路径）：单一连续圆钝纵脊解析场，
+预设 light 3 mm / natural 5 mm（manual_edit 内部默认）/ pronounced 7 mm；标记 `editing_mode=true`、
 `geometry_source=procedural_appearance`、`subject_observation_matched=false`。
 这是外观编辑，不是本人喉结的观测重建；0.5.5 的观测驱动模式仍可用 `--neck-algorithm observation` 调用。
 

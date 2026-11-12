@@ -80,3 +80,40 @@ def test_field_audit_excludes_back_projection_and_reports_outer_islands():
     r=a["apex_curvature"][0]
     assert 4.<r["radius_mm"]<9. and r["fit_rms_mm"]<.05   # analytic r=sigma^2/A=6.25 mm
     assert all(p["finite_fraction"]>.3 for p in a["profiles"].values())
+
+
+def _synthetic_morphology():
+    return {
+        "peak_mm": 4.6, "reference_neck_width_mm": 127.0,
+        "fit": {"vertical_support_up_mm": 13.3, "vertical_support_down_mm": 13.9,
+                "lateral_half_width_mm": 11.5, "tip_radius_mm": 4.2,
+                "centre_offset_mm": 0.2},
+    }
+
+
+def test_continuous_design_nonnegative_single_body_and_c2_boundary():
+    from head_rgbd import neck_continuous as nc
+    design, audit = nc.design_from_morphology(_synthetic_morphology(), .95, .9)
+    u = np.arange(-60., 60.01, .1)
+    p = nc.na.sculpt_profile(u, np.zeros_like(u), design)
+    assert p.min() >= -1e-9
+    assert p.max() > 3.0
+    assert abs(p[0]) < 1e-9 and abs(p[-1]) < 1e-9
+    edge_u = design.half_width_mm + design.tip_radius_mm
+    near = np.abs(np.abs(u) - edge_u) < .15
+    assert np.max(np.abs(np.gradient(p, u)[near])) < .05   # slope vanishes at the lateral edge
+    v = np.arange(-60., 60.01, .1)
+    env = nc._plateau(v, design.length_up_mm, design.length_down_mm)
+    assert abs(env[0]) < 1e-9 and abs(env[-1]) < 1e-9
+    near_v = np.abs(np.abs(v) - max(design.length_up_mm, design.length_down_mm)) < .15
+    assert np.max(np.abs(np.gradient(env, v)[near_v])) < .05
+    # one connected positive region at 10% of the peak, no multiple bumps
+    from scipy.ndimage import label
+    U, V = np.meshgrid(u, v)
+    field = nc.na.sculpt_profile(U, V, design)
+    lab, n = label(field >= .1 * field.max())
+    assert n == 1
+    apex = field.max()
+    row = field[np.argmin(np.abs(v)), :]
+    assert np.all(np.diff(row[:np.argmax(row) + 1]) >= -.01)
+    assert np.all(np.diff(row[np.argmax(row):]) <= .01)

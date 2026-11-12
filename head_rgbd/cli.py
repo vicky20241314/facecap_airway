@@ -82,10 +82,21 @@ def _add_neck_prominence_options(parser: argparse.ArgumentParser, defaults: dict
     )
     parser.add_argument(
         "--neck-algorithm",
-        choices=("observation", "manual_edit"),
-        default=prominence.get("algorithm", "manual_edit"),
-        help="manual_edit: designed laryngeal appearance sculpt (default; marked as an edit, "
-             "not an observation reconstruction); observation: subject-observed background+ridge fit",
+        choices=("observation", "manual_edit", "continuous_reference"),
+        default=prominence.get("algorithm", "continuous_reference"),
+        help="continuous_reference: non-negative reference-shape appearance bump (0.6 default); "
+             "manual_edit: older designed ridge; observation: subject-observed background+ridge fit",
+    )
+    parser.add_argument(
+        "--neck-reference",
+        default=prominence.get("reference_path"),
+        help="reference OBJ for continuous_reference (shape proportions only; default from config)",
+    )
+    parser.add_argument(
+        "--neck-alpha",
+        type=float,
+        default=prominence.get("alpha", 0.55),
+        help="smooth direction field blend: 1 = frame normal, 0 = smoothed surface normal",
     )
     parser.add_argument(
         "--neck-preset",
