@@ -83,9 +83,15 @@ def _add_neck_prominence_options(parser: argparse.ArgumentParser, defaults: dict
     parser.add_argument(
         "--neck-algorithm",
         choices=("observation", "manual_edit"),
-        default=prominence.get("algorithm", "observation"),
-        help="observation: subject-observed background+ridge fit (default, 0.5.5); "
-             "manual_edit: fixed-amplitude appearance editor (marked as an edit, not a reconstruction)",
+        default=prominence.get("algorithm", "manual_edit"),
+        help="manual_edit: designed laryngeal appearance sculpt (default; marked as an edit, "
+             "not an observation reconstruction); observation: subject-observed background+ridge fit",
+    )
+    parser.add_argument(
+        "--neck-preset",
+        choices=("light", "natural", "pronounced"),
+        default=prominence.get("preset", "natural"),
+        help="appearance preset: light 3 mm / natural 5 mm / pronounced 7 mm forward ridge",
     )
     parser.add_argument(
         "--neck-prominence-mm",

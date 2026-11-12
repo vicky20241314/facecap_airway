@@ -36,7 +36,7 @@ from head_rgbd.paths import PROJECT_ROOT, asset_paths, resolve_runtime_dir, veri
 from head_rgbd.reference_contract import inner_lip_gap_mm, observed_landmarks_m
 
 
-EXPECTED_VERSION = "0.5.5"
+EXPECTED_VERSION = "0.5.6"
 
 
 class VersionContract(unittest.TestCase):
@@ -450,8 +450,15 @@ class ExportContract(unittest.TestCase):
             self.assertEqual(landmarks["states"]["open"]["mesh"], "head_open_m.obj")
             neck = json.loads((output / "neck_prominence.json").read_text(encoding="utf-8"))
             self.assertEqual(neck["base_algorithm_version"], "0.5.2")
-            self.assertEqual(neck["neck_method"], "depth_conditioned_procedural_prominence")
-            self.assertEqual(neck["geometry_source"], "template_plus_procedural_deformation")
+            self.assertEqual(neck["neck_method"], "manual_laryngeal_appearance_sculpt")
+            self.assertIs(neck["editing_mode"], True)
+            self.assertEqual(neck["geometry_source"], "procedural_appearance")
+            self.assertIs(neck["subject_observation_matched"], False)
+            for state in ("closed", "open"):
+                entry = neck["states"][state]
+                self.assertIn("requested_height_mm", entry)
+                self.assertIn("safety_fallback", entry)
+            self.assertEqual(neck["geometry_source"], "procedural_appearance")
             self.assertFalse(neck["effective_enabled"])
             for state in ("closed", "open"):
                 self.assertIn(state, neck["states"])

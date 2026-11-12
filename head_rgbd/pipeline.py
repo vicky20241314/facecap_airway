@@ -495,6 +495,43 @@ def export_delivery(
     exports: dict[str, dict[str, Any]] = {}
     prominence_reports: dict[str, dict[str, Any]] = {}
     saved_dense = None
+    algorithm = str(getattr(args, "neck_algorithm", None)
+                    or (defaults.get("neck_prominence") or {}).get("algorithm", "manual_edit"))
+    sculpt_plan = None
+    sculpt_error = None
+    if algorithm == "manual_edit":
+        # The appearance sculpt needs both states up front: the local
+        # refinement is a union patch so closed/open share one refined topology.
+        from head_rgbd import neck_appearance as na
+        import numpy as _np
+
+        preset = str(getattr(args, "neck_preset", None)
+                     or (defaults.get("neck_prominence") or {}).get("preset", "natural"))
+        design = na.design_from_preset(preset)
+        sculpt_dense = None
+        try:
+            with _np.load(fit / "parameters.npz", allow_pickle=False) as stored:
+                sculpt_dense = stored["dense_vertices"], stored["dense_faces"]
+        except FileNotFoundError:
+            sculpt_dense = None
+        enabled, gate_reason = npn.effective_enable(prominence_config, True)
+        if sculpt_dense is None:
+            sculpt_error = "parameters_npz_missing"
+        elif enabled:
+            try:
+                sculpt_plan = na.build_sculpt_states(
+                    states=states, references=references["references"],
+                    dense_vertices=sculpt_dense[0], dense_faces=sculpt_dense[1],
+                    prepared_dir=Path(sequence).parent,
+                    landmarks_payload=landmarks_payload,
+                    design=design,
+                    sequence_rows=sequence_rows,
+                )
+                sculpt_plan["preset"] = preset
+            except Exception as error:  # never block the export on the sculpt
+                sculpt_error = f"{type(error).__name__}: {error}"
+        else:
+            sculpt_error = f"sculpt_disabled:{gate_reason}"
     for state in states:
         reference = references["references"][state]
         if stage not in reference.get("stages", {}):
@@ -527,9 +564,67 @@ def export_delivery(
             transform = nl.resolve_reference_transform(
                 landmark_record, sequence_rows, reference["frame_id"]
             )
-            algorithm = str(getattr(args, "neck_algorithm", None)
-                            or (defaults.get("neck_prominence") or {}).get("algorithm", "observation"))
-            if algorithm == "observation":
+            if algorithm == "manual_edit":
+                if sculpt_plan is not None:
+                    item = sculpt_plan["states"][state]
+                    metrics = item["metrics"]
+                    guards = item["guards"]
+                    prominence_report = {
+                        "state": state,
+                        "neck_method": na.NECK_METHOD_SCULPT,
+                        "geometry_source": na.GEOMETRY_SOURCE_SCULPT,
+                        "editing_mode": True,
+                        "subject_observation_matched": False,
+                        "effective_enabled": True,
+                        "landmark_source": item["position_audit"].get("position_source"),
+                        "position_source": item["position_audit"].get("position_source"),
+                        "position_audit": item["position_audit"],
+                        "preset": sculpt_plan.get("preset"),
+                        "design": sculpt_plan["design"],
+                        "requested_height_mm": metrics["requested_height_mm"],
+                        "realized_height_mm": metrics["realized_height_mm"],
+                        "width_mm": metrics.get("width_half_mm"),
+                        "length_mm": metrics.get("length_half_mm"),
+                        "tip_rounding_mm": metrics["requested_tip_radius_mm"],
+                        "transition_lengths_mm": metrics["requested_transitions_mm"],
+                        "safety_fallback": "none",
+                        "guards": guards,
+                        "self_intersections": {
+                            "count": item["self_intersections"]["count"],
+                            "segments": item["self_intersections"]["segments"],
+                            "candidate_faces": item["self_intersections"]["candidate_faces"],
+                        },
+                        "protected_vertices_moved": item["protection_check"]["protected_vertices_moved"],
+                        "background_available": item["background_available"],
+                        "background": (item["background"].residual_stats if item["background"] is not None else None),
+                        "support": {"vertices": int(item["support"].sum())},
+                        "status": "applied" if (guards["status"] == "passed"
+                                                and item["self_intersections"]["count"] == 0
+                                                and item["protection_check"]["protected_vertices_moved"] == 0)
+                                  else "skipped",
+                        "reason": None,
+                        "refined_local_topology": True,
+                    }
+                    if prominence_report["status"] != "applied":
+                        prominence_report["reason"] = "sculpt_geometry_guard_failed"
+                        prominence_report["safety_fallback"] = "geometry_guard_failed_keep_baseline"
+                        shaped_vertices = None
+                        export_faces = None
+                    else:
+                        shaped_vertices = item["shaped_vertices"]
+                        export_faces = sculpt_plan["refined_faces"]
+                else:
+                    prominence_report = {
+                        "state": state, "neck_method": na.NECK_METHOD_SCULPT,
+                        "geometry_source": na.GEOMETRY_SOURCE_SCULPT,
+                        "editing_mode": True, "subject_observation_matched": False,
+                        "effective_enabled": False, "status": "skipped",
+                        "reason": sculpt_error or "sculpt_unavailable",
+                        "safety_fallback": "not_applied",
+                    }
+                    shaped_vertices = None
+                    export_faces = None
+            elif algorithm == "observation":
                 prominence_report = _observation_prominence(
                     state=state,
                     base_vertices=base_vertices,
@@ -542,39 +637,34 @@ def export_delivery(
                     config=prominence_config,
                     prepared_dir=Path(sequence).parent,
                 )
-            else:
-                prominence_report = npn.apply_prominence(
-                    state=state,
-                    base_vertices=base_vertices,
-                    faces=saved_dense[1],
-                    landmark_record=landmark_record,
-                    transform=transform,
-                    model_to_camera=reference["animated_model_to_reference_camera_4x4"],
-                    landmarks_m=stage_reference["landmarks_m"],
-                    config=prominence_config,
-                    prepared_dir=Path(sequence).parent,
-                )
-                prominence_report["neck_method"] = "manual_edit_two_field_prominence"
-                prominence_report["editing_mode"] = True
-            shaped_vertices = prominence_report.pop("shaped_vertices", None)
+            if algorithm == "observation":
+                shaped_vertices = prominence_report.pop("shaped_vertices", None)
+                export_faces = None
             prominence_reports[state] = prominence_report
             export_vertices = (
                 shaped_vertices if shaped_vertices is not None else base_vertices
             )
-            trimesh.Trimesh(export_vertices, saved_dense[1], process=False).export(
+            faces_out = export_faces if export_faces is not None else saved_dense[1]
+            trimesh.Trimesh(export_vertices, faces_out, process=False).export(
                 final_mesh, include_normals=True)
         else:
             # Historical runs already contain the final dense OBJ files.
+            export_faces = None
+            from head_rgbd import neck_appearance as na_mod
+            legacy_sculpt = algorithm == "manual_edit"
             prominence_reports[state] = {
                 "state": state,
                 "status": npn.STATUS_SKIPPED,
                 "reason": "legacy_mesh_storage_shaping_unsupported",
                 "effective_enabled": False,
-                "neck_method": npn.NECK_METHOD,
-                "geometry_source": npn.GEOMETRY_SOURCE,
+                "editing_mode": legacy_sculpt,
+                "neck_method": na_mod.NECK_METHOD_SCULPT if legacy_sculpt else npn.NECK_METHOD,
+                "geometry_source": na_mod.GEOMETRY_SOURCE_SCULPT if legacy_sculpt else npn.GEOMETRY_SOURCE,
+                "subject_observation_matched": False if legacy_sculpt else None,
             }
             shutil.copy2(fit / stage_reference['mesh'], final_mesh)
-        geometries[state] = mesh_checks(final_mesh, stage_reference)
+        geometries[state] = mesh_checks(
+            final_mesh, None if (export_faces is not None) else stage_reference)
         exports[state] = {"reference": reference, "mesh": final_mesh, "geometry": geometries[state]}
     vertices = {state: item["geometry"]["vertices"] for state, item in exports.items()}
     if len(set(vertices.values())) != 1:
@@ -583,6 +673,11 @@ def export_delivery(
     with np.load(fit / "support_dense.npz", allow_pickle=False) as stored:
         support = {key: stored[key] for key in stored.files}
     label = support["region_label"]
+    if sculpt_plan is not None and len(label) == sculpt_plan["base_vertex_count"]:
+        # map the base-vertex support labels onto the refined topology:
+        # a midpoint inherits the label of its first parent
+        labels1 = np.concatenate([label, label[[i for i, _ in sculpt_plan["level1_edges"]]]])
+        label = np.concatenate([labels1, labels1[[i for i, _ in sculpt_plan["level2_edges"]]]])
     vertex_count = geometries[states[0]]["vertices"]
     if len(label) != vertex_count:
         raise ValueError("support labels do not match the exported dense topology")
@@ -613,6 +708,8 @@ def export_delivery(
         "schema": "head_rgbd.delivery.reference_landmarks.v2",
         "states": {},
         "landmark_indices": "FLAME dynamic contour + static 68, zero based",
+        "applies_to_topology": "base" if (sculpt_plan is not None and any(
+            r.get("status") == "applied" for r in prominence_reports.values())) else "base",
         "observation_is_manual_truth": False,
         "transform_translation_unit": "m",
         "note": (
@@ -657,6 +754,10 @@ def export_delivery(
             npn.NECK_METHOD,
         ),
         "editing_mode": bool(any(r.get("editing_mode") for r in prominence_reports.values())),
+        "subject_observation_matched": (
+            False if any(r.get("editing_mode") for r in prominence_reports.values())
+            else (True if any(r.get("status") == "applied" for r in prominence_reports.values()) else None)
+        ),
         "neck_algorithm": str(getattr(args, "neck_algorithm", None)
                               or (defaults.get("neck_prominence") or {}).get("algorithm", "observation")),
         "geometry_source": next(
@@ -684,6 +785,11 @@ def export_delivery(
                 for key in (
                     "status", "reason", "effective_enabled", "landmark_source",
                     "editing_mode", "neck_method", "geometry_source",
+                    "subject_observation_matched", "preset", "design", "position_source",
+                    "position_audit", "requested_height_mm", "realized_height_mm",
+                    "width_mm", "length_mm", "tip_rounding_mm", "transition_lengths_mm",
+                    "safety_fallback", "guards", "protected_vertices_moved",
+                    "refined_local_topology", "background_available",
                     "moved_vertices", "max_displacement_mm", "ridge_parameters",
                     "background", "depth_observation_rms_mm", "residual_max_mm",
                     "requested_final_prominence_mm", "baseline_prominence_mm",
@@ -718,6 +824,9 @@ def export_delivery(
         "meters_per_unit": MESH_METERS_PER_UNIT,
         "stage": stage,
         "topology_shared": True,
+        "refined_local_topology": bool(sculpt_plan is not None and any(
+            r.get("status") == "applied" for r in prominence_reports.values())),
+        "base_vertices": int(sculpt_plan["base_vertex_count"]) if sculpt_plan is not None else None,
         "mesh_files": [filenames[state] for state in states],
         "states": {},
     }
@@ -776,6 +885,12 @@ def export_delivery(
         },
         "neck": neck,
         "neck_prominence": neck_prominence_payload,
+        "editing": {
+            "mode": neck_prominence_payload.get("neck_algorithm"),
+            "editing_mode": neck_prominence_payload.get("editing_mode"),
+            "geometry_source": neck_prominence_payload.get("geometry_source"),
+            "subject_observation_matched": neck_prominence_payload.get("subject_observation_matched"),
+        },
         "support_counts": dict(zip(SUPPORT_LABELS, counts)),
         "warnings": warnings,
         "limitations": fit_report.get("limitations", [])

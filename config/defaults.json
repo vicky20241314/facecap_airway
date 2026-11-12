@@ -72,7 +72,8 @@
       6.0,
       8.0
     ],
-    "note": "observation-driven V3: a frozen quadratic background is fitted to this subject's depth observations and a small strongly-priored ridge (|h| <= 3 mm) plus a bounded residual accounts for the local shape; algorithm=manual_edit switches to the fixed-amplitude two-field editor, which is an appearance EDIT, not a subject reconstruction; the neck front remains template-based",
-    "algorithm": "observation"
+    "note": "default manual_edit = manually designed laryngeal appearance sculpt (editing_mode=true, geometry_source=procedural_appearance, subject_observation_matched=false); the low-frequency background correction may place the template neck on the observed skin, but the prominence height/width/length/tip are design parameters, not observations; algorithm=observation keeps the subject-observed fit as a research option",
+    "algorithm": "manual_edit",
+    "preset": "natural"
   }
 }

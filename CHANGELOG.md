@@ -1,5 +1,40 @@
 # Changelog
 
+## 0.5.6 - 2026-11-12
+
+Manually designed laryngeal appearance sculpt (user-authorised non-observed
+geometry). The public export entry now defaults to `neck_prominence.algorithm =
+manual_edit`, which is this sculpt; it is explicitly an appearance edit, not a
+subject reconstruction.
+
+- One continuous analytic field p(u,v) = A(v)*C(s): Wendland C2 vertical ridge
+  envelope with independent upper/lower support lengths, a rounded-V cross
+  section with a finite tip radius and C2 lateral window, and a width envelope;
+  displacement along one constant local neck normal, multiplied only by a
+  continuous protection taper. Values and first derivatives vanish at the
+  support boundary; no stacked bumps, no negative-ridge or depth-pull terms, no
+  post-export smoothing.
+- Presets: light 3 mm / natural 5 mm (default) / pronounced 7 mm forward
+  height; natural uses a 29 mm lateral support, 15/24 mm up/down transitions
+  and a 2.5 mm tip radius. Appearance parameters only, not anatomy.
+- Positioning uses the recorded label when available and otherwise estimates
+  the larynx position from the mesh (neck midline, jaw and neck base) with
+  `position_source=estimated_from_mesh`; no ArUco requirement.
+- Local two-level red-green refinement in the target patch (union masks for
+  closed/open, per-state midpoint positions, protection inherited) - core edges
+  about 1-2 mm; the experiment driver and the public entry share the same
+  kernel.
+- Acceptance is appearance/geometry based (no depth MAE requirement): zero
+  self-intersections, degeneration, winding errors, true folds, slender faces,
+  edge growth <= 2.2x, protected vertices unchanged, facial first-hit shifts
+  <= 0.05 mm, shared refined topology, and the disk OBJ read back within 1 um.
+  `requested/realized height, width, length, tip radius, transitions and
+  safety_fallback` are recorded per state.
+- Finding: the three presets are geometrically safe on both states with
+  realized heights equal to the design (5.0 -> 4.96/4.97 mm at natural); the
+  delivered geometry is exactly the analytic design sampled on the refined
+  mesh. Public entry export is byte-identical to the experiment's natural
+  preset. Report: docs/NECK_APPEARANCE_SCULPT_REPORT.html.
 ## 0.5.5 - 2026-11-11
 
 Subject-observed neck reconstruction V3. Replaces the fixed-height procedural

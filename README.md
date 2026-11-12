@@ -73,7 +73,7 @@ Loop 目标 0.5，先检查几何安全，失败才回退；默认不做三候�
 ```
 facecap_airway_delivery/
 ├─ README.md                    本说明
-├─ VERSION                      0.5.5
+├─ VERSION                      0.5.6
 ├─ CHANGELOG.md
 ├─ VALIDATION.md                本机实际验证记录
 ├─ docs/FAST_PATH_REPORT.md     0.3.0 加速版算法：实测、消融与剩余热点（权威）
@@ -150,7 +150,7 @@ facecap_airway_delivery/
 ### 4.4 自检
 
 ```pwsh
-.\headrgbd.cmd --version      # headrgbd 0.5.5 (facecap-inspired-v2-strict)
+.\headrgbd.cmd --version      # headrgbd 0.5.6 (facecap-inspired-v2-strict)
 .\headrgbd.cmd assets         # 7 个模型 SHA256 全部 ok
 .\headrgbd.cmd device         # 打开相机 + 载入模型
 ```
@@ -535,7 +535,12 @@ OSQP 迭代）。要再压缩需要改 QP 的缩放/条件数，本轮未做，�
 
 ## 10. 版本
 
-`0.5.5`。`VERSION`、`--version`、`README`、`manifest.json` 四处一致。
+`0.5.6`。`VERSION`、`--version`、`README`、`manifest.json` 四处一致。
+
+0.5.6 的默认颈部阶段是**人工设计的喉结外观塑形**（`manual_edit`）：单一连续圆钝纵脊解析场，
+预设 light 3 mm / natural 5 mm（默认）/ pronounced 7 mm；标记 `editing_mode=true`、
+`geometry_source=procedural_appearance`、`subject_observation_matched=false`。
+这是外观编辑，不是本人喉结的观测重建；0.5.5 的观测驱动模式仍可用 `--neck-algorithm observation` 调用。
 
 0.5.5 把颈前阶段改为观测驱动：局部颈坐标系、冻结二次背景、有符号圆钝脊形与受限残差，
 用真实首命中深度拟合并按固定协议验收（默认 `neck_prominence.algorithm=observation`）。
