@@ -62,8 +62,10 @@ fixed design remains the default). Editing mode only: `editing_mode=true`,
   `manifest.json`, `reference_shape.json`, `geometry_verification.json`,
   `shape_metrics.json`, `run_status.json`, four-way/section/field renders and
   the report; `tools/make_reference_auto_report.py` builds
-  `docs/NECK_REFERENCE_AUTO_SCULPT_REPORT.html`. All 11 checks passed on this
-  run (exit 0, ~23 s). Regression coverage added in
+  `docs/NECK_REFERENCE_AUTO_SCULPT_REPORT.html`. All 12 checks passed on this
+  run (exit 0, ~23 s), including a facial first-hit test that classifies rays
+  by the ORIGINAL baseline face indices and requires <=0.05 mm depth shift on
+  protected face/lips/jaw faces (measured <=0.00003 mm). Regression coverage added in
   `tests/test_reference_auto.py` (front-sheet exclusion, island reporting,
   curvature, plus the earlier intersection/scale tests).
 

@@ -41,6 +41,11 @@ def write_report(out: Path, *, summary: dict, timing) -> Path:
         f"<figure><img style='width:46%' src='{img(out / 'render' / f'{s}_section_{k}.png')}'/>"
         f"<figcaption>{s}：{'纵向' if k == 'long' else '横向'}剖面（磁盘 OBJ 面片∩平面）</figcaption></figure>"
         for s in ("closed", "open") for k in ("long", "cross"))
+    gv = json.loads((out / "geometry_verification.json").read_text(encoding="utf-8"))
+    facial_row = "；".join(
+        f"{s} 命中 {gv['states'][s]['facial_first_hit']['protected_face_hits']} 条，"
+        f"最大位移 {gv['states'][s]['facial_first_hit']['max_abs_shift_mm']} mm"
+        for s in ("closed", "open") if s in gv["states"])
     analysis = summary.get("analysis", {})
     fieldfigs = "".join(
         f"<figure><img style='width:100%' src='{img(out / 'render' / f'field_{s}.png')}'/>"
@@ -206,6 +211,7 @@ L50 {level_cell('open','0.5','l')} mm、L10 {level_cell('open','0.1','l')} mm。
 <tr><td>非流形边 / 边界边</td><td>{disk['closed']['topology']['nonmanifold_edges']} / {disk['closed']['topology']['boundary_edges']}（基线同为 {json.loads((out/'geometry_verification.json').read_text(encoding='utf-8'))['baseline_topology']['boundary_edges']}）</td></tr>
 <tr><td>自交（局部检测范围）</td><td>{json.loads((out/'geometry_verification.json').read_text(encoding='utf-8'))['intersection_scope']}</td></tr>
 <tr><td>受保护位移（闭/张）</td><td>{m('closed','protected_displacement_mm',4)} / {m('open','protected_displacement_mm',4)} mm</td></tr>
+<tr><td>面部首命中（原始基线面索引）</td><td>{facial_row}（≤0.05 mm 通过）</td></tr>
 <tr><td>磁盘坐标误差</td><td>≤{max(disk[s]['max_abs_diff_m'] for s in disk):.2e} m</td></tr>
 </table>
 

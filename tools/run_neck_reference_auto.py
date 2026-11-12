@@ -224,6 +224,23 @@ def main(argv=None) -> int:
             refined_normals = prominence.vertex_normals(item["shaped_vertices"], faces)
             moved = np.abs(item["applied_mm"]) > 1e-9
             backward_moved = int((moved & ((refined_normals @ item["frame"].n) <= 0.)).sum())
+            # Facial first hits are classified by ORIGINAL baseline face indices.
+            base_v, base_f = load_obj(BASELINE_DELIVERY / f"head_{state}_m.obj")
+            lm = np.asarray(item["landmarks_camera"], float)
+            hit_base = v3.first_hit_batch(base_v, base_f, lm)
+            hit_new = v3.first_hit_batch(item["shaped_vertices"], faces, lm)
+            hit = hit_base["hit"] & hit_new["hit"]
+            protected_face = item["protection"][base_f[hit_base["triangle"]]].all(axis=1)
+            checked = hit & protected_face
+            shift_mm = (hit_new["depth_m"] - hit_base["depth_m"]) * 1000.
+            facial = {
+                "rays": int(len(lm)), "hits": int(hit.sum()),
+                "protected_face_hits": int(checked.sum()),
+                "max_abs_shift_mm": round(float(np.max(np.abs(shift_mm[checked])))
+                                          if checked.any() else None, 5),
+                "classification": "original baseline face indices; protected face/lips/jaw/"
+                                  "ears/back/bottom faces only",
+            }
             verification[state] = {
                 "guards": guards,
                 "intersections": item["intersections"],
@@ -231,6 +248,7 @@ def main(argv=None) -> int:
                 "protected_displacement_mm": item["metrics"]["protected_displacement_mm"],
                 "backward_facing_moved_vertices": backward_moved,
                 "moved_vertices": int(moved.sum()),
+                "facial_first_hit": facial,
             }
         # closed/open topology identity
         topology_match = (
@@ -258,6 +276,11 @@ def main(argv=None) -> int:
                 nra.appearance.accept_guards(verification[s]["guards"]) for s in verification),
             "no_backward_facing_moved": all(
                 verification[s]["backward_facing_moved_vertices"] == 0 for s in verification),
+            "facial_first_hit_unchanged": all(
+                verification[s]["facial_first_hit"]["protected_face_hits"] > 0
+                and verification[s]["facial_first_hit"]["max_abs_shift_mm"] is not None
+                and verification[s]["facial_first_hit"]["max_abs_shift_mm"] <= .05
+                for s in verification),
         }
         (out / "geometry_verification.json").write_text(json.dumps({
             "schema": "head_rgbd.neck_reference_auto.verification.v1",
