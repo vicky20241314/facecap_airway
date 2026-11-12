@@ -537,6 +537,18 @@ OSQP 迭代）。要再压缩需要改 QP 的缩放/条件数，本轮未做，�
 
 `0.7.0`。`VERSION`、`--version`、`README`、`manifest.json` 四处一致。
 
+0.8.0-candidate 头部比例实验（未切换公共默认）：对参考和目标用同一头部区域定义测得
+H/W/D = 139.7/158.6/186.6 与 228.6/190.4/223.7 mm；宽度/深度比一致约 1.20，头高比 1.64。
+按参考比例，目标主峰应为 H≈4.78 mm、W50≈39.0 mm、L50≈19.6 mm、A-B 间距≈37.6 mm。
+本轮独立实验 `tools/run_neck_head_proportion.py`（输出
+`runtime/outputs/neck_head_proportion_20261112_213500`）保留双特征、正鞍部、无负位移与几何安全，
+在真实保护/颈底约束下把主峰高度做到参考比例，但最终表面 W50≈35.5 mm、L50≈11 mm、A-B 间距≈15.5 mm，
+宽度、纵向长度和间距比例仍未达到；完整头尺度 B 的支撑在张口低于真实颈底并进入保护渐变（实测），
+因此公共默认仍为 0.7.0，未整体缩小后宣称通过。比例冲突、最终表面/基面/新增场分开口径、物理单位与
+头部归一化两套渲染见 [NECK_HEAD_PROPORTION_REPORT.html](docs/NECK_HEAD_PROPORTION_REPORT.html)。
+参考副本与比例资产已保存为 `assets/neck_reference/identity_rest_20261109.obj` /
+`identity_rest_20261109_asset.json`，公共默认配置已指向项目内资产，不再依赖外部历史实验目录。
+
 0.7.0 起公共默认的颈前阶段是**连续主次双特征参考外观**（`neck_prominence.algorithm=continuous_reference`，
 实现为 `head_rgbd/neck_dual.py`）。参考 `identity_rest.obj` 的原始前表面在 σ=8 mm 背景上确有上下两处中央特征：
 feature_A（上、主，x≈0，y≈−104 mm，高 3.98 mm）和 feature_B（下、次，x≈0，y≈−127 mm，高 1.47 mm），

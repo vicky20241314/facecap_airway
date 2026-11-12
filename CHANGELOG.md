@@ -1,5 +1,59 @@
 # Changelog
 
+## 0.8.0-candidate - 2026-11-12
+
+Head-scale proportion audit and closest-safe two-feature meshes. **Not the public
+default**; the 0.7.0 implementation remains the public entry because the final
+surface proportion conditions are not fully met.
+
+- Same-protocol head region (crown to chin/menton; temporal band 0.35-0.85 H;
+  neck/shoulders excluded): reference H/W/D 139.68/158.61/186.59 mm, target
+  228.63/190.36/223.74 mm. Width and depth ratios agree at 1.200/1.199; the head
+  height ratio is 1.637 (the reference head is relatively flatter). The declared
+  ratio protocol uses W_head for cross-section/height/tip and H_head for
+  longitudinal lengths/A-B distance; S_head geometric 1.3306 is used only for the
+  isotropic filter (target sigma=10.64 mm) and normalized visual, not to inflate
+  the larynx.
+- Reference-ratio targets: H_A 4.78 mm, W50_A 39.0 mm, L50_A 19.64 mm, H_B 1.76 mm,
+  saddle 1.36 mm, B local 0.40 mm, distance_AB 37.65 mm, tip 8.23 mm. The 0.7.0
+  final surface was only about half on the main normalized height, width, L50 and
+  distance; the earlier 0.7.0 metric was the added displacement, not the final
+  surface.
+- A/B/C: A=0.7.0; B=head-scale full (vertical 1.637, lateral 1.2) at the current
+  centre; C=closest safe (vertical 0.68, lateral 1.0, height 1.2). B actually
+  fails support/bottom: closed/open 10% support clears protection by 13.5/3.2 mm,
+  gate minima 0.315/0.324, and the lower support is -4.36/-12.21 mm below the true
+  neck bottom cut; the closed secondary feature is cut. This is an actual
+  support/boundary failure, not merely a conservative pre-screen rejection. C is
+  geometric/support safe: guards pass, self-intersections 0, clearances
+  27.8/9.6 mm at 0.7.0-style margins, bottom margins 16.7/8.3 mm, B/A 0.371/0.365,
+  saddle/A 0.289/0.289, positive saddle, no negative displacement.
+- C final-surface metrics (head-scale sigma 10.64 mm): A height 2.45 mm,
+  W50 35.5 mm, L50 11.0 mm, B 1.27 mm, B/A 0.519, saddle 0.225, distance 15.5 mm;
+  normalized H_A/W_head 0.0129 vs reference 0.0251, W50/W 0.1865 vs 0.2049
+  (passes +/-10%), L50/H 0.048 vs 0.117, distance/H 0.068 vs 0.165, B local and
+  tip outside tolerance. The C applied core reaches the reference main height
+  (H 4.78 mm, W50~30.5 mm) but the final surface's head-scale background and the
+  existing base/under-chin volume change the same-protocol readings; base,
+  0.7.0 and final surface are all recorded separately in
+  final_surface_metrics.json. **Proportion conditions are explicitly not met.**
+- Delivered meshes: `runtime/outputs/neck_head_proportion_20261112_213500/final/
+  head_closed_m.obj` and `head_open_m.obj`; shared topology, boundary 124,
+  consistent winding, no materials, disk read-back <=5e-11 m. `head_scale_audit.json`,
+  `reference_ratio_targets.json`, `final_surface_metrics.json`,
+  `shape_parameters.json`, `placement_audit.json`, `deformation_audit.json`,
+  `geometry_verification.json`, `run_status.json`, physical-unit and
+  head-normalized renders, profiles, heatmaps and wireframes.
+- Traceable asset: the reference copy is `assets/neck_reference/
+  identity_rest_20261109.obj` with `identity_rest_20261109_asset.json` (source
+  SHA 2e334111...); the public 0.7.0 config now points to the project-owned copy,
+  not the external historical experiment directory.
+- Report: `docs/NECK_HEAD_PROPORTION_REPORT.html`. Regression:
+  `tests/test_head_scale.py` plus the existing contracts; 239 passed, 2 skipped,
+  only the 5 known `.ps1` launcher failures on this host. The public default
+  remains 0.7.0; the 0.8.0-candidate is delivered as the closest safe geometry
+  with the proportion conflict explicitly recorded.
+
 ## 0.7.0 - 2026-11-12
 
 Continuous primary/secondary reference appearance; **this is now the public

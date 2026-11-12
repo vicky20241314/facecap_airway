@@ -33,3 +33,4 @@ runtime/_validation/
 .idea/
 Thumbs.db
 Desktop.ini
+!assets/neck_reference/*.obj

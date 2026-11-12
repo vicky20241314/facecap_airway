@@ -259,10 +259,15 @@ class DualDesign:
         return max(abs(self.v_top_mm), abs(self.v_bottom_mm))
 
     def scaled(self, qf: float) -> "DualDesign":
-        return DualDesign(self.height_mm * qf, self.v_top_mm * qf, self.v_bottom_mm * qf,
-                          self.v_b_mm * qf, self.t.copy(), self.h.copy(),
-                          self.half_a_mm * qf, self.half_b_mm * qf,
-                          self.tip_a_mm * qf, self.tip_b_mm * qf, self.source_sigma_mm)
+        return self.scaled_axes(qf, qf, qf)
+
+    def scaled_axes(self, vertical: float, lateral: float, height: float) -> "DualDesign":
+        return DualDesign(self.height_mm * height,
+                          self.v_top_mm * vertical, self.v_bottom_mm * vertical,
+                          self.v_b_mm * vertical, self.t.copy(), self.h.copy(),
+                          self.half_a_mm * lateral, self.half_b_mm * lateral,
+                          self.tip_a_mm * lateral, self.tip_b_mm * lateral,
+                          self.source_sigma_mm)
 
     def profile(self, v):
         t = (self.v_top_mm - np.asarray(v)) / (self.v_top_mm - self.v_bottom_mm)
@@ -605,8 +610,8 @@ def audit_state(plan, state):
 def build_states(*, states=None, references, dense_vertices, dense_faces, reference_path,
                  alpha=nc.DEFAULT_ALPHA, direction_modes=("constant", "smooth"),
                  fixed_center_vertex=None, q_override=None, f_override=None,
-                 require_support=True):
-    morph = extract_two_feature(reference_path)
+                 require_support=True, morph_override=None):
+    morph = morph_override if morph_override is not None else extract_two_feature(reference_path)
     base, scale = nc.measure_target(references, dense_vertices, dense_faces)
     q = float(q_override) if q_override is not None else \
         scale.W_neck_mm / morph["reference_neck_width_mm"]
