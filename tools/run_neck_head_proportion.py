@@ -252,6 +252,44 @@ def main(argv=None) -> int:
                 export_obj(exp / f"head_{s}_m.obj", plan["states"][s]["run"]["vertices"], plan["faces"])
         C = builds["C_safe"]
         Bfull = builds["B_head_full"]
+        # base surface for calibration/final metrics
+        base_mesh = {s: load_obj(BASE / f"head_{s}_m.obj") for s in ("closed", "open")}
+        base_v, base_f = base_mesh["closed"]
+        sigma = 8.0 * scale["S_head_geometric"]
+        target_h = targets["target_mm"]["H_A_mm"]
+        base_rep = None
+        calib = []
+        safe_C = None
+        safe_feat = None
+        best_factor = None
+        for factor in (1.2, 1.6, 2.0, 2.4, 2.8, 3.2, 3.6):
+            if abs(factor - 1.2) > 1e-9:
+                m = _morph_axes(morph, .68, 1.0, factor)
+                C = nd.build_states(references=refs, dense_vertices=dense_v, dense_faces=dense_f,
+                                    reference_path=args.reference, fixed_center_vertex=TARGET_CENTER,
+                                    q_override=1.0, f_override=1.0, morph_override=m,
+                                    require_support=False, direction_modes=("constant", "smooth"))
+            guards_ok = all(nd.nc.na.accept_guards(C["states"][st]["guards"]) and
+                            C["states"][st]["intersections"]["count"] == 0 for st in ("closed", "open"))
+            f1 = _front_field(C["states"]["closed"]["run"]["vertices"], C["faces"],
+                              chin, up, right, fwd, sigma, v_min=-80.0, v_max=-25.0)
+            final_a = None if not f1 or "A" not in f1 else float(f1["A"]["height_mm"])
+            sup_ok = all(C["audits"][st]["support"]["inside_protected"] == 0 and
+                         C["audits"][st]["support"]["gate_min"] >= .98 and
+                         C["audits"][st]["support"]["bottom_margin_mm"] >= 8.0
+                         for st in ("closed", "open"))
+            calib.append({"height_factor": factor, "final_A_mm": None if final_a is None else round(final_a, 4),
+                          "guards_ok": bool(guards_ok), "support_ok": bool(sup_ok),
+                          "target_A_mm": round(target_h, 4)})
+            if not guards_ok or not sup_ok:
+                break
+            safe_C, safe_feat, best_factor = C, f1, factor
+            if final_a is not None and final_a >= target_h:
+                break
+        if safe_C is None:
+            raise RuntimeError("no safe height factor for C")
+        C, C_feat_initial, height_factor = safe_C, safe_feat, best_factor
+        builds["C_safe"] = C
         # final export + disk
         disk = {}
         for s in ("closed", "open"):
@@ -266,14 +304,10 @@ def main(argv=None) -> int:
                                                         "inconsistent_shared_edges", "boundary_edges",
                                                         "zero_area_faces")},
                        "no_materials": not any(k in path.read_text(encoding="utf-8") for k in ("mtllib", "usemtl"))}
-        # base mesh for final-surface metric and facial
-        base_mesh = {s: load_obj(BASE / f"head_{s}_m.obj") for s in ("closed", "open")}
-        base_v, base_f = base_mesh["closed"]
         base_rep = topology_report(base_v, base_f); base_boundary = _boundary_set(base_f)
         # final surface metrics (same protocol, head-scale sigma)
-        sigma = 8.0 * scale["S_head_geometric"]
         base_feat = _front_field(base_v, base_f, chin, up, right, fwd, sigma, v_min=-80.0, v_max=-25.0)
-        c_feat = _front_field(C["states"]["closed"]["run"]["vertices"], C["faces"], chin, up, right, fwd, sigma, v_min=-80.0, v_max=-25.0)
+        c_feat = C_feat_initial
         a_feat = _front_field(A["closed"][0], A["closed"][1], chin, up, right, fwd, sigma, v_min=-80.0, v_max=-25.0)
         a060_v, a060_f = load_obj(A060 / "head_closed_m.obj")
         a060_feat = _front_field(a060_v, a060_f, chin, up, right, fwd, sigma, v_min=-80.0, v_max=-25.0)
@@ -609,6 +643,7 @@ def main(argv=None) -> int:
                    "B_inter": {s: Bfull["states"][s]["intersections"]["count"] for s in ("closed", "open")},
                    "B_feat": {s: Bfull["audits"][s]["features"] for s in ("closed", "open")},
                    "facial": facial, "disk": disk, "final_metrics": final_metrics,
+                   "calibration": calib, "C_height_factor": height_factor,
                    "timing": timing, "total_seconds": round(time.perf_counter() - t0, 3),
                    "version": "0.8.0-candidate"}
         (out / "report_summary.json").write_text(json.dumps(summary, indent=1, ensure_ascii=False,

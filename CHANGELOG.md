@@ -28,11 +28,15 @@ surface proportion conditions are not fully met.
   geometric/support safe: guards pass, self-intersections 0, clearances
   27.8/9.6 mm at 0.7.0-style margins, bottom margins 16.7/8.3 mm, B/A 0.371/0.365,
   saddle/A 0.289/0.289, positive saddle, no negative displacement.
-- C final-surface metrics (head-scale sigma 10.64 mm): A height 2.45 mm,
-  W50 35.5 mm, L50 11.0 mm, B 1.27 mm, B/A 0.519, saddle 0.225, distance 15.5 mm;
-  normalized H_A/W_head 0.0129 vs reference 0.0251, W50/W 0.1865 vs 0.2049
-  (passes +/-10%), L50/H 0.048 vs 0.117, distance/H 0.068 vs 0.165, B local and
-  tip outside tolerance. The C applied core reaches the reference main height
+- C final-surface metrics (head-scale sigma 10.64 mm): A height 3.01 mm,
+  W50 36.0 mm, L50 10.0 mm, B 1.38 mm, B/A 0.457, saddle 0.503, distance 15.0 mm;
+  the applied height was calibrated against the final surface and then limited by
+  actual guards: factor 1.2 -> final A 2.448 mm, factor 1.6 -> final A 3.012 mm;
+  factor 2.0 fails the normal/guard audit, so the largest safe applied main is
+  6.37 mm, not an arbitrary height increase;
+  normalized H_A/W_head 0.0158 vs reference 0.0251, W50/W 0.1891 vs 0.2049
+  (passes +/-10%), L50/H 0.0437 vs 0.117, distance/H 0.0656 vs 0.165, B local
+  and tip outside tolerance. The C applied core reaches the reference main height
   (H 4.78 mm, W50~30.5 mm) but the final surface's head-scale background and the
   existing base/under-chin volume change the same-protocol readings; base,
   0.7.0 and final surface are all recorded separately in

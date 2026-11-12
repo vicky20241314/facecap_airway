@@ -138,8 +138,9 @@ editing_mode=true · geometry_source=reference_driven_appearance · subject_obse
 目标 {scale['target']['H_head_mm']:.1f}/{scale['target']['W_head_mm']:.1f}/{scale['target']['D_head_mm']:.1f} mm；
 宽度/深度比一致约 {scale['ratios']['W_head_mm']:.2f}，头高比 {scale['ratios']['H_head_mm']:.2f}。
 按参考比例，目标主峰应为 H≈{tgt_mm['H_A_mm']:.2f} mm、W50≈{tgt_mm['W50_A_mm']:.2f} mm，
-而 0.7.0 最终表面主峰 H≈{fh(A7.get('A',{}),'height_mm')} mm、W50≈{(A7.get('A',{}).get('width') or {}).get('w50_mm','—')} mm，
-约只有目标的 55–60%。同时 0.7.0 报告的是新增位移，而本轮把最终表面、未塑形基面和新增场分开测量。</li>
+而 0.7.0 最终表面主峰 H≈{fh(A7.get('A',{}),'height_mm')} mm（约为目标的 60%）；
+0.7.0 的 W50 读数 {(A7.get('A',{}).get('width') or {}).get('w50_mm','—')} mm 主要来自基面/颏下体量，不能与目标宽度直接比较。
+同时 0.7.0 报告的是新增位移，而本轮把最终表面、未塑形基面和新增场分开测量。</li>
 <li><b>参考和目标头部尺寸如何同口径测量？</b>两者都排除颈部/肩部/底切，取“颅顶到颏下/menton”为头高，
 取颏下以上、颅顶以下 0.35–0.85 头高带的横向/前后的 0.5–99.5 百分位为头宽/头深。
 参考 H/W/D={scale['reference']['H_head_mm']:.2f}/{scale['reference']['W_head_mm']:.2f}/{scale['reference']['D_head_mm']:.2f} mm；
@@ -154,7 +155,8 @@ editing_mode=true · geometry_source=reference_driven_appearance · subject_obse
 A-B 间距 {fmt(prop['distance_AB_over_H_head'].get('final'))} vs {prop['distance_AB_over_H_head']['reference']:.4f}（{100*prop['distance_AB_over_H_head'].get('rel_error', 0):.1f}%）；
 尖端半径 {fmt(prop['tip_radius_A_over_W_head'].get('final'))} vs {prop['tip_radius_A_over_W_head']['reference']:.4f}。
 <b>比例条件未通过</b>；不是“检测到两个峰”或“B/A 相同”就算完成。</li>
-<li><b>哪些尺寸受空间适配影响，影响多少？</b>核心高度取参考 W_head 比例（height=1.2，H_A={design['height_mm']:.2f} mm），
+<li><b>哪些尺寸受空间适配影响，影响多少？</b>核心高度先按参考 W_head 比例（height=1.2，施加 H_A≈4.78 mm），再按“最终表面同口径”校准到 height={summary.get('C_height_factor', 1.2):.2f}（施加 H_A≈{design['height_mm']:.2f} mm，最终表面 A≈{fh(C.get('A',{}),'height_mm')} mm；
+height=2.0 时实际 guard/法向检查失败，因此这是最大安全施加高度，不是任意增高），
 横向在保护/下颌侧缘安全约束下只能取 lateral=1.0（W50≈{fh(C.get('A',{}),'height_mm') and (C.get('A',{}).get('width') or {}).get('w50_mm','—')} mm，目标 {tgt_mm['W50_A_mm']:.1f}）；
 纵向为容纳双特征、下颌保护与真实颈底切口取 vertical=0.68（L50≈{C.get('A',{}).get('l50_mm','—')} mm，目标 {tgt_mm['L50_A_mm']:.1f}；间距 {C.get('relative',{}).get('centre_distance_mm','—')} mm，目标 {tgt_mm['distance_AB_mm']:.1f}）。
 主峰高度/次峰/B/A/鞍部保留，宽度/纵向长度/间距被目标空间截断；不是再次整体乘 f 后宣称通过。</li>
