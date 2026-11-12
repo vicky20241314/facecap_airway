@@ -73,7 +73,7 @@ Loop 目标 0.5，先检查几何安全，失败才回退；默认不做三候�
 ```
 facecap_airway_delivery/
 ├─ README.md                    本说明
-├─ VERSION                      0.5.6
+├─ VERSION                      0.5.7
 ├─ CHANGELOG.md
 ├─ VALIDATION.md                本机实际验证记录
 ├─ docs/FAST_PATH_REPORT.md     0.3.0 加速版算法：实测、消融与剩余热点（权威）
@@ -150,7 +150,7 @@ facecap_airway_delivery/
 ### 4.4 自检
 
 ```pwsh
-.\headrgbd.cmd --version      # headrgbd 0.5.6 (facecap-inspired-v2-strict)
+.\headrgbd.cmd --version      # headrgbd 0.5.7 (facecap-inspired-v2-strict)
 .\headrgbd.cmd assets         # 7 个模型 SHA256 全部 ok
 .\headrgbd.cmd device         # 打开相机 + 载入模型
 ```
@@ -535,7 +535,13 @@ OSQP 迭代）。要再压缩需要改 QP 的缩放/条件数，本轮未做，�
 
 ## 10. 版本
 
-`0.5.6`。`VERSION`、`--version`、`README`、`manifest.json` 四处一致。
+`0.5.7`。`VERSION`、`--version`、`README`、`manifest.json` 四处一致。
+
+0.5.7 新增比例驱动的喉结塑形候选（`head_rgbd/neck_proportional.py`）：从未塑形网格测量
+W_head/W_neck/L_neck，按比例推导尺寸与归一化位置（s 扫描两态保护净距），纵包络可选 C2 平台。
+本模板上 H/W_neck 与 L10/L_neck 达标，但 W10/W_neck 与成品 L50/W50 未达项目偏好，
+因此**默认入口仍为 0.5.6 固定设计**，阻断项与 A/B 见
+[NECK_PROPORTIONAL_SCULPT_REPORT.html](docs/NECK_PROPORTIONAL_SCULPT_REPORT.html)。
 
 0.5.6 的默认颈部阶段是**人工设计的喉结外观塑形**（`manual_edit`）：单一连续圆钝纵脊解析场，
 预设 light 3 mm / natural 5 mm（默认）/ pronounced 7 mm；标记 `editing_mode=true`、

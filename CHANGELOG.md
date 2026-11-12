@@ -1,5 +1,36 @@
 # Changelog
 
+## 0.5.7 - 2026-11-12
+
+Proportional sculpt candidate (NOT the public default; 0.5.6 fixed design stays
+the default because the proportion preferences were not fully met).
+
+- New scale measurement on the unshaped mesh: W_head (front-facing lower-face
+  band, ears excluded by orientation), W_neck (median full cross-section width
+  over the middle of the neck), L_neck (submental start where the section
+  reaches 90% of the neck reference width, to a neck root found from a
+  cross-section widening; the mesh cut is only a documented fallback), robust
+  neck axis from section centroids. All methods, confidence and fallbacks are
+  recorded (W_head 94.0, W_neck 121.1, L_neck 42.0 mm on this template).
+- Presets become relative strengths (0.6/1.0/1.4); sizes are derived:
+  H = 0.055 W_neck, L10 = 0.46 L_neck, and a coordinated W10 = L10/1.25/(0.65/0.686)
+  so a short neck shrinks the whole design instead of squashing it; slope
+  (<=1.1 mm/mm), head-width and space limits are applied and recorded.
+- Normalised position s in [0,1] along the front midline; the natural centre is
+  chosen from a candidate scan that maximises the weaker-state clearance from
+  the chin protection (s = 0.38 here, recorded together with the label's s and
+  the offset). The centre is a shared base-topology vertex binding, so closed
+  and open cannot drift apart.
+- Vertical envelope option B: C2 plateau (1-t^2)^3 retains effective height much
+  longer than the Wendland profile at the same support; A/B evaluated.
+- Result on this template: H/W_neck 0.054 and L10/L_neck 0.37 meet the design
+  ranges, geometry is safe (0 folds/self-intersections/slender faces, facial
+  hit shift 0.0000 mm, disk OBJ verified), but W10/W_neck 0.14 (coordinated
+  width for the short neck, outside the nominal 0.26-0.34 band) and the
+  measured L50/W50 0.85-0.99 remain below the preferred 1.1-1.5; the measured
+  apex curvature fit is polluted by the flanks. These are recorded as blocking
+  items in docs/NECK_PROPORTIONAL_SCULPT_REPORT.html; the default entry keeps
+  the 0.5.6 geometry.
 ## 0.5.6 - 2026-11-12
 
 Manually designed laryngeal appearance sculpt (user-authorised non-observed

@@ -72,8 +72,10 @@
       6.0,
       8.0
     ],
-    "note": "default manual_edit = manually designed laryngeal appearance sculpt (editing_mode=true, geometry_source=procedural_appearance, subject_observation_matched=false); the low-frequency background correction may place the template neck on the observed skin, but the prominence height/width/length/tip are design parameters, not observations; algorithm=observation keeps the subject-observed fit as a research option",
+    "note": "default manual_edit = manually designed laryngeal appearance sculpt (editing_mode=true, geometry_source=procedural_appearance, subject_observation_matched=false): fixed appearance presets light 3 mm / natural 5 mm / pronounced 7 mm; proportional=false keeps these; the proportional-sizing candidate lives in head_rgbd/neck_proportional.py and tools/run_neck_proportional.py and is not the public default (see docs/NECK_PROPORTIONAL_SCULPT_REPORT.html)",
     "algorithm": "manual_edit",
-    "preset": "natural"
+    "preset": "natural",
+    "proportional": false,
+    "proportional_note": "proportional sizing (0.5.7 candidate, tools/run_neck_proportional.py) is available but NOT the default: W10/W_neck and L50/W50 did not meet the project preference on this short-neck template; see docs/NECK_PROPORTIONAL_SCULPT_REPORT.html. amplitude_mm/candidate_amplitudes_mm apply ONLY to --neck-algorithm observation (research path); the default manual_edit size is the fixed 5 mm design."
   }
 }

@@ -85,6 +85,7 @@ class SculptDesign:
     centre_offset_mm: float = 0.0
     centre_tilt: float = 0.0
     v_shift_mm: float = 0.0
+    envelope: str = "wendland"   # "wendland" (0.5.6) or "plateau" (1-t^2)^3
 
     @property
     def half_width_mm(self) -> float:
@@ -101,6 +102,7 @@ class SculptDesign:
             "length_up_mm": self.length_up_mm,
             "length_down_mm": self.length_down_mm,
             "tip_radius_mm": self.tip_radius_mm,
+            "envelope": self.envelope,
             "centre_offset_mm": self.centre_offset_mm,
             "centre_tilt": self.centre_tilt,
             "v_shift_mm": self.v_shift_mm,
@@ -115,10 +117,18 @@ def design_from_preset(preset: str, **overrides) -> SculptDesign:
     return SculptDesign(**values)
 
 
-def _vertical_envelope(dv_mm: np.ndarray, length_up_mm: float, length_down_mm: float) -> np.ndarray:
-    """Wendland C2 ridge envelope with independent up/down support lengths."""
+def _vertical_envelope(dv_mm: np.ndarray, length_up_mm: float, length_down_mm: float,
+                      kind: str = "wendland") -> np.ndarray:
+    """Ridge envelope with independent up/down support lengths.
+
+    ``wendland``: (1-t)^4 (4t+1), C2 with a peaked apex.
+    ``plateau``: (1-t^2)^3, C2 plateau that keeps effective height much longer
+    before dropping to zero at the support end.
+    """
     length = np.where(dv_mm >= 0, max(length_up_mm, 1e-3), max(length_down_mm, 1e-3))
     t = np.clip(np.abs(dv_mm) / length, 0.0, 1.0)
+    if kind == "plateau":
+        return np.where(t < 1.0, (1.0 - t * t) ** 3, 0.0)
     return np.where(t < 1.0, (1.0 - t) ** 4 * (4.0 * t + 1.0), 0.0)
 
 
@@ -133,7 +143,7 @@ def sculpt_profile(u_mm: np.ndarray, v_mm: np.ndarray, design: SculptDesign) -> 
     u = np.asarray(u_mm, dtype=np.float64)
     v = np.asarray(v_mm, dtype=np.float64)
     dv = v - design.v_shift_mm
-    envelope = _vertical_envelope(dv, design.length_up_mm, design.length_down_mm)
+    envelope = _vertical_envelope(dv, design.length_up_mm, design.length_down_mm, design.envelope)
     # lateral width slightly narrower toward the vertical ends
     shrink = 1.0 - 0.22 * (1.0 - envelope)  # 1 at the apex, 0.78 at the ends
     half_width = np.maximum(design.half_width_mm * shrink, 1e-3)
