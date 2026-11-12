@@ -72,7 +72,7 @@
       6.0,
       8.0
     ],
-    "note": "0.6.0 default = continuous_reference: reference shape proportions only (positive central lobe), single non-negative C2 bump, proportional placement in the measured submental-root segment, coordinated whole-design scaling and a smooth outward direction field. editing_mode=true, geometry_source=reference_driven_appearance, subject_observation_matched=false. manual_edit and observation remain available via --neck-algorithm for history/research.",
+    "note": "0.7.0 default = continuous_reference with the two-feature reference implementation: reference_feature_A (upper/main) and reference_feature_B (lower/secondary) are measured from the raw anterior geometry on a sigma=8 mm background; one continuous non-negative C2 two-feature field is fitted, positioned proportionally and scaled together to fit protection and the true neck bottom cut. editing_mode=true, geometry_source=reference_driven_appearance, subject_observation_matched=false. manual_edit/observation remain historical/research paths.",
     "algorithm": "continuous_reference",
     "preset": "natural",
     "proportional": false,
@@ -80,6 +80,7 @@
     "reference_path": "D:/project_neck/runtime/v8_tail_smoke/experiment_20261109-200612/final/identity_rest.obj",
     "reference_sha256": "2e33411107bd67c5df3ca138294dc798a051bcf66f8dce9835e104d5606077ff",
     "alpha": 0.55,
-    "continuous_note": "the negative reference residual/ring and the separate shoulder islands are never transported; the public default falls back to the unshaped baseline (status skipped) if the reference is missing or the support/guard audit fails, never to the old pitted manual design."
+    "continuous_note": "the negative reference residual/ring and the separate shoulder islands are never transported; the public default falls back to the unshaped baseline (status skipped) if the reference is missing or the support/guard audit fails, never to the old pitted manual design.",
+    "two_feature_note": "feature_B is a broad lower-neck/upper-chest secondary shoulder, not a second identical larynx; it is not named anatomically. The old 0.6.0 single-feature route cut it at y=-125 and could not represent it."
   }
 }

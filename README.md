@@ -535,9 +535,25 @@ OSQP 迭代）。要再压缩需要改 QP 的缩放/条件数，本轮未做，�
 
 ## 10. 版本
 
-`0.6.0`。`VERSION`、`--version`、`README`、`manifest.json` 四处一致。
+`0.7.0`。`VERSION`、`--version`、`README`、`manifest.json` 四处一致。
 
-0.6.0 起公共默认的颈前阶段是**连续非负参考外观**（`neck_prominence.algorithm=continuous_reference`）：
+0.7.0 起公共默认的颈前阶段是**连续主次双特征参考外观**（`neck_prominence.algorithm=continuous_reference`，
+实现为 `head_rgbd/neck_dual.py`）。参考 `identity_rest.obj` 的原始前表面在 σ=8 mm 背景上确有上下两处中央特征：
+feature_A（上、主，x≈0，y≈−104 mm，高 3.98 mm）和 feature_B（下、次，x≈0，y≈−127 mm，高 1.47 mm），
+中心距 23.0 mm、B/A=0.369、鞍部 1.14 mm（0.285A，浅而宽）。旧 0.6.0 单峰路径先在 y≥−125 的 ROI/门控
+（B 中心 −127）丢掉 B，再以 y∈[−116,−94] 选峰、以单峰 C2 拟合；二次背景只是进一步减弱 B，不是第一丢失点。
+新实现把参考中线双峰剖面作为一条连续控制曲线（C2 端窗），横向宽度在 A/B 间连续过渡，A/B 共享一个非负支撑域，
+鞍部为正；不迁移负残差、不逐点截零、不拼两个独立球包。目标短颈/下颌保护/真实颈底切口使整体协调缩放 f=0.72：
+闭/张 A 峰 2.69/2.70 mm、B 峰 1.00/0.99 mm，B 局部突出 0.22/0.21 mm、B 在 ±3/±5 mm 剖面稳定；
+10% 保护净距 27.8/9.6 mm、距真实颈底切口 16.7/8.3 mm；相对未塑形基线最小法向位移 0.000 mm、负面积 0 mm²。
+27/27 验收通过，最终 OBJ 为 23,043 顶点 / 45,954 面、边界 124 条、共享拓扑。
+公开入口 `headrgbd.cmd export` 已用同一实现验证（版本 0.7.0，公开交付
+`runtime/outputs/public_neck_primary_secondary_070`，与独立工具逐顶点一致 ≤5e-9 m）。
+报告：[NECK_PRIMARY_SECONDARY_SHAPE_REPORT.html](docs/NECK_PRIMARY_SECONDARY_SHAPE_REPORT.html)。
+0.6.0 的单峰默认已被 0.7.0 双特征实现取代，仅保留为历史输出/对照；manual_edit/observation 仍是历史/研究路径。
+公开 manifest 的 `degraded` 仍来自既有张口内唇深度先验警告（与基线相同），不是颈部算法失败。
+
+0.6.0 曾是公共默认的**连续非负参考外观**（单峰；`neck_prominence.algorithm=continuous_reference`）：
 `config/defaults.json` 指定参考 `D:/project_neck/runtime/v8_tail_smoke/experiment_20261109-200612/final/identity_rest.obj`
 （SHA256 `2e334111…5606077ff`）；`head_rgbd/neck_continuous.py` 只取参考中心正叶的
 高度/宽度/长度/上下过渡/尖端圆钝比例，在闭口颏下-颈底可靠颈段内做比例定位

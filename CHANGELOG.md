@@ -1,5 +1,80 @@
 # Changelog
 
+## 0.7.0 - 2026-11-12
+
+Continuous primary/secondary reference appearance; **this is now the public
+default** (`neck_prominence.algorithm = continuous_reference`, implemented by
+`head_rgbd/neck_dual.py` and `neck_dual.build_states` in the pipeline).
+
+- Reference audit (raw anterior geometry, Y-up/+Z-front, sigma=8 mm background):
+  two real, vertically aligned central features on the reference midline:
+  feature_A at x=0, y=-104.0 mm, height 3.98 mm (upper/main) and feature_B at
+  x=0, y=-127.0 mm, height 1.47 mm (lower/secondary); centre distance 23.0 mm,
+  B/A=0.369, saddle 1.14 mm (0.285 A; B is 0.34 mm above the saddle). Both
+  features are detected at sigma 6 and 8 mm; B merges into the broad lower-neck
+  volume at sigma 10 mm. The under-chin peaks at |x|~20 mm, y~-75 mm are jaw
+  contours and the old 1.55 mm islands at |x|~26-31 mm are lateral shoulder
+  residuals; neither is feature_B. The two features are not named as cartilage
+  anatomy: A is consistent with a laryngeal prominence and B with a lower-neck/
+  cricoid-level or upper-chest volume, but no anatomical measurement is claimed.
+- The 0.6.0 single route lost feature_B first at sampling/gating: the old ROI
+  bottom was y=-125, feature_B is centred at -127, the lower 9 mm gate is zero at
+  y<=-125 and fades B's upper wing, the peak-selection core was y in [-116,-94],
+  and a single C2 profile cannot represent two unequal peaks. The quadratic
+  background further attenuated B but was not the first loss point.
+- New representation: the measured midline two-feature profile is baked as one
+  smooth C2-windowed control curve (not two independent spheres), coupled to a
+  lateral width that blends between the measured A and B widths; A and B share
+  one connected non-negative support. The saddle is positive, and no negative
+  reference residual is transferred or vertex-wise clipped. Target placement is
+  proportional; the whole design (heights, widths, lengths, tip radii, A-B
+  distance) is scaled together. The 10% contour clears protection by >=8 mm and
+  the lower contour stays above the true mesh neck-bottom cut; the 0.5.7 root is
+  used for neck-length proportion only because feature_B itself lies at the
+  lower-neck/upper-chest transition.
+- Delivered meshes: `runtime/outputs/neck_primary_secondary_20261112_200000/
+  final/head_closed_m.obj` and `head_open_m.obj`; 23,043 vertices / 45,954 faces
+  each, shared topology, boundary 124 (mouth interior + neck bottom preserved),
+  consistent winding, no materials, disk read-back <=5e-11 m. Closed/open feature
+  A 2.69/2.70 mm, feature B 1.00/0.99 mm, B/A 0.371/0.367, saddle 0.78/0.78 mm,
+  B local prominence 0.22/0.21 mm, B W50 24.5/25.0 mm and stable at +/-3/+/-5 mm
+  neighbour sections. All 27 checks pass (non-negative displacement min 0.000 mm,
+  negative area 0 mm^2, one 10%/50% support component, protection clearances
+  27.8/9.6 mm, bottom-cut margins 16.7/8.3 mm, facial first hits 3e-5/2e-5 mm on
+  original baseline face indices, protected vertices moved 0, local
+  self-intersections 0).
+- Causal A/B/C: A (0.6.0 single) has A 4.04 mm and no B; B (two-feature at the
+  old 0.6.0 centre with the safe intermediate scale f=0.8) shows A 2.99/B 1.11,
+  no negative area, guards pass, but its lower 10% contour is only 5.84 mm above
+  the open bottom cut; C is the proportional/coordinated final at f=0.72 with the
+  8.3 mm open bottom margin. The main peak is smaller than 0.6.0 (2.69 vs 4.04)
+  because the target's short neck, chin protection and true bottom cut cannot
+  accept the larger two-feature support; heights, widths, lengths and A-B
+  distance were scaled together, not the secondary alone or the width alone.
+- Public entry switched and verified: config algorithm remains
+  `continuous_reference` but the implementation is `neck_dual.build_states`;
+  CLI `--neck-reference/--neck-alpha` remain; the pipeline and manifest use
+  `two_feature_reference_appearance` / `reference_driven_appearance` /
+  `editing_mode=true` / `subject_observation_matched=false`; observation-only
+  amplitude/radius fields are nulled. `headrgbd.cmd --version` prints 0.7.0;
+  `headrgbd.cmd export --run ... --delivery-output
+  runtime/outputs/public_neck_primary_secondary_070` produced 23,043/45,954
+  faces and vertices within 5e-9 m of the independent tool. The public manifest
+  status is `degraded` only from the pre-existing open inner-lip depth prior
+  warning (the baseline manifest has the same warning); the neck stage is
+  `applied`. If the reference/support/feature audit fails, the entry keeps the
+  unshaped baseline with a recorded skipped reason, never the old pitted design.
+- Tools/report: `tools/run_neck_primary_secondary.py` (A/B/C meshes, 31 renders
+  including four-way full-head views, neck close-ups flat+smooth, longitudinal
+  and A/B transverse sections, heatmaps, wireframes and the feature-loss figure),
+  `tools/make_neck_primary_secondary_report.py`, and
+  `docs/NECK_PRIMARY_SECONDARY_SHAPE_REPORT.html` (answers the seven questions,
+  records feature_A/B, relative size, centre distance, saddle, transition and the
+  uncertainty/design assumptions). Regression: `tests/test_neck_dual.py` plus the
+  updated version/export contracts; 238 passed, 2 skipped; the only 5 failures
+  are the known `.ps1` launcher tests on this host (no `pwsh.exe`). Historical
+  captures, model assets and the 0.6.0/0.5.9/0.5.8 outputs are unchanged.
+
 ## 0.6.0 - 2026-11-12
 
 Continuous non-negative reference-driven laryngeal appearance; **this is now the

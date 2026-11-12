@@ -536,7 +536,7 @@ def export_delivery(
     continuous_error = None
     if algorithm == "continuous_reference":
         import numpy as _np
-        from head_rgbd import neck_continuous as ncont
+        from head_rgbd import neck_dual as ncont
         reference_path = (getattr(args, "neck_reference", None)
                           or (defaults.get("neck_prominence") or {}).get("reference_path"))
         alpha = float(getattr(args, "neck_alpha", None)
@@ -748,7 +748,7 @@ def export_delivery(
                 "reason": "legacy_mesh_storage_shaping_unsupported",
                 "effective_enabled": False,
                 "editing_mode": legacy_sculpt or legacy_continuous,
-                "neck_method": ("continuous_reference_appearance" if legacy_continuous
+                "neck_method": ("two_feature_reference_appearance" if legacy_continuous
                                 else (na_mod.NECK_METHOD_SCULPT if legacy_sculpt else npn.NECK_METHOD)),
                 "geometry_source": ("reference_driven_appearance" if legacy_continuous
                                     else (na_mod.GEOMETRY_SOURCE_SCULPT if legacy_sculpt else npn.GEOMETRY_SOURCE)),
