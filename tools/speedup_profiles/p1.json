@@ -1,0 +1,12 @@
+{
+  "note": "P1b: fit_c 230 steps, identity_surface tail cut by 10 (150-189), motion_final keeps its 40 steps (190-229); fit_c refresh 20 on plateau phases but identity_large keeps 10; motion_v2 stays at its 80-step / interval-10 baseline because 60-75 steps or interval 20 degraded s100624 fixed-ray.",
+  "common": [
+    "--steps", "230",
+    "--front-steps", "230",
+    "--phase-cuts", "0.17391304347826086,0.4782608695652174,0.6521739130434783,0.8260869565217391",
+    "--correspondence-interval", "20",
+    "--motion-correspondence-interval", "10"
+  ],
+  "base": [],
+  "full": []
+}

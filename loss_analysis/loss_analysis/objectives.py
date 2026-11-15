@@ -614,6 +614,102 @@ ALL_STAGES = (FIT_C, MOTION_V2, IDENTITY_V2, FIELD_STAGE, *FIT_D_STAGES)
 
 
 # --------------------------------------------------------------------------
+# neck_direct (v2 builder): one 3-D displacement solve per state
+# --------------------------------------------------------------------------
+NECK_DIRECT_TERMS = (
+    Term(
+        key="data_radial",
+        label_cn="径向数据项（目标场残差）",
+        source="head_rgbd/neck_fit.py:659-667 (energy_3d), residual from build_samples_3d",
+        kind="data",
+        normaliser="(R_target - r)^2 in mm^2; weight = area quadrature x validity gate",
+        normaliser_unit="mm^2",
+        weight="per-sample w (area x data weight), no extra constant",
+        weight_unit="mm^2",
+        reduction="sum over vertex and in-face samples",
+        denominator="none (sum, not mean) — the sample count changes between iterations",
+        notes="this is the only term that measures distance to the target field; its "
+              "post-solve RMS/P95 is recorded as a diagnostic, not as a second objective",
+    ),
+    Term(
+        key="bending",
+        label_cn="弯曲项（沿轴向的二阶差分）",
+        source="head_rgbd/neck_fit.py:724,662 (bending_operator, ||Rb D||^2)",
+        kind="prior",
+        normaliser="(Rb D)^2 with Rb = L_out restricted to the editable set",
+        normaliser_unit="mm^2",
+        weight="ell_reg per material position (axial length in mm)",
+        weight_unit="mm",
+        reduction="sum over 3 x vertices",
+        denominator="none",
+        notes="penalises curvature change of the displacement, not the surface curvature",
+    ),
+    Term(
+        key="tangent",
+        label_cn="切向先验",
+        source="head_rgbd/neck_fit.py:639-656,663 (sqrt(mu_t A)(I - e_r e_r^T))",
+        kind="prior",
+        normaliser="(T D)^2, T = sqrt(mu_t A) (I - e_r e_r^T)",
+        normaliser_unit="mm^2",
+        weight="mu_t: bridge 0.15 / body 0.50 (blended over seam_prior_edges)",
+        weight_unit="1",
+        reduction="sum over 3 x vertices",
+        denominator="none",
+        notes="bridge may move in 3-D but not freely; the body is strongly tangential",
+    ),
+    Term(
+        key="anchor",
+        label_cn="固定头部锚定",
+        source="head_rgbd/neck_fit.py:639-656,664 (sqrt(mu_a A))",
+        kind="prior",
+        normaliser="(A D)^2, A = sqrt(mu_a A_v) I",
+        normaliser_unit="mm^2",
+        weight="anchor_strength * (1 - data weight) + anchor_near_A near the fixed head",
+        weight_unit="1",
+        reduction="sum over free vertices",
+        denominator="none",
+        notes="Dirichlet fixed set is separate: those rows are removed from the unknowns",
+    ),
+    Term(
+        key="small",
+        label_cn="数值先验（各向同性）",
+        source="head_rgbd/neck_fit.py:665-666",
+        kind="prior",
+        normaliser="mu_small * sum A_v |D|^2",
+        normaliser_unit="mm^2",
+        weight="mu_small = 1e-3",
+        weight_unit="1",
+        reduction="sum over vertices",
+        denominator="none",
+        notes="keeps the Hessian well posed; not a shape prior",
+    ),
+)
+
+NECK_DIRECT = Stage(
+    key="neck_direct",
+    label_cn="颈部直接塑形（统一 3-D 位移，逐状态）",
+    module="tools/build_neck_direct_v2.py:280-330 -> head_rgbd/neck_fit.py:680-872 (fit_unified)",
+    parameters=("D (每顶点 3-D 位移, mm)",),
+    terms=NECK_DIRECT_TERMS,
+    objective_scope=("one Gauss-Newton solve per state over B+C; A and the fixed set are "
+                     "Dirichlet boundaries. The solver objective is the sum of the five terms, "
+                     "minimised under radial/tangential trust-region bounds. Remesh passes are "
+                     "geometry proposals checked by a crease rollback, not optimisation steps"),
+    solver="Gauss-Newton + backtracking line search (max 60 iterations)",
+    notes=("the builder now persists the per-iteration energy/energy_parts in loss_direct.json; "
+           "before that only the final solve summary existed in build_direct.json",
+           "target residual (vertex/quadrature RMS, P95, max) is recomputed at the end of the "
+           "solve and is a diagnostic; it is not added to the objective",
+           "remesh merges/flips/splits and the seam density budget belong to structure/density "
+           "acceptance, not to this objective",
+           "marker-derived t_center and amplitude semantics are inputs; an offline candidate may "
+           "not change them"),
+)
+
+ALL_STAGES = (FIT_C, MOTION_V2, IDENTITY_V2, FIELD_STAGE, *FIT_D_STAGES, NECK_DIRECT)
+
+
+# --------------------------------------------------------------------------
 # v0.4.0 mode variants: same stage key, different objective
 # --------------------------------------------------------------------------
 MODE_VARIANTS = (

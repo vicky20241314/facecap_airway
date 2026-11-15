@@ -15,9 +15,13 @@ from head_rgbd.prepare import backproject  # noqa: E402
 SPEC = am.ArucoSpec()
 INTR = np.array([849.22216796875, 849.1190795898438, 640.1256103515625, 361.0])
 CFG = {"min_px_per_cell": 3.0, "min_side_px": 18.0, "min_area_px2": 400.0}
+# A fronto-parallel sticker at 470 mm projects at fx/depth px per mm.  Using a
+# physically consistent scale keeps the synthetic frame usable by the size gate.
+PROJECTED_PX_PER_MM = float(INTR[0] / 470.0)
+RENDER_DEPTH_MM = 470
 
 
-def render(spec=SPEC, px_per_mm=24.0, canvas=900):
+def render(spec=SPEC, px_per_mm=PROJECTED_PX_PER_MM, canvas=900):
     """Sticker on a white canvas; returns (rgb, corners-of-black-square)."""
     sticker = am.sticker_image(spec, px_per_mm)
     page = np.full((canvas, canvas), 255, np.uint8)
@@ -53,13 +57,24 @@ class Detection(unittest.TestCase):
         self.assertEqual(result["selected"]["detected_id"], 0)
         self.assertEqual(len(result["candidates"]), 1)
 
-    def test_wrong_id_is_rejected(self):
+    def test_any_dictionary_id_is_accepted(self):
+        # Auto ID: the print spec's target_id is not a detection filter.
         other = am.ArucoSpec(target_id=7)
         rgb, _ = render(spec=other)
         result = am.detect_candidates(rgb, SPEC, CFG)
+        self.assertIsNone(result["rejection"])
+        self.assertEqual(result["selected"]["detected_id"], 7)
+        self.assertIsNone(result["selected"]["expected_id"])
+        self.assertTrue(result["selected"]["auto_id"])
+
+    def test_multiple_different_ids_are_rejected(self):
+        rgb, _ = render(canvas=420)
+        other = am.sticker_image(am.ArucoSpec(target_id=7), PROJECTED_PX_PER_MM)
+        rgb[10:10 + other.shape[0], 10:10 + other.shape[1]] = np.dstack([other] * 3)
+        result = am.detect_candidates(rgb, SPEC, CFG)
         self.assertIsNone(result["selected"])
-        self.assertEqual(result["rejection"], "target_id_not_found")
-        self.assertEqual(result["candidates"][0]["rejection"], "wrong_id")
+        self.assertEqual(result["rejection"], "multiple_marker_ids")
+        self.assertEqual(sorted(set(result["detected_ids"])), [0, 7])
 
     def test_duplicate_target_id_is_rejected(self):
         rgb, _ = render(canvas=1400)
@@ -80,7 +95,10 @@ class Detection(unittest.TestCase):
         result = am.detect_candidates(rgb, SPEC, CFG)
         if result["candidates"]:
             self.assertIsNone(result["selected"])
-            self.assertEqual(result["rejection"], "target_marker_failed_quality")
+            self.assertEqual(result["rejection"], result["candidates"][0]["rejection"])
+            self.assertIn(result["rejection"],
+                          ("quad_area_too_small", "quad_side_too_short",
+                           "cell_pitch_below_limit", "quad_side_ratio_excessive"))
         else:
             self.assertEqual(result["rejection"], "no_marker_detected")
 
@@ -91,6 +109,58 @@ class Detection(unittest.TestCase):
         rgb, _ = render(spec=am.ArucoSpec(black_square_mm=12.0), px_per_mm=1.35, canvas=60)
         result = am.detect_candidates(rgb, SPEC, {**CFG, "min_px_per_cell": 3.0})
         self.assertAlmostEqual(3.6, 12.0 * 849.22 / 470.0 / 6.0, places=1)
+
+
+class Size(unittest.TestCase):
+    def _detect(self, rgb, depth):
+        return am.detect_candidates(rgb, SPEC, CFG, depth=depth, intrinsics=INTR)
+
+    def test_size_estimated_from_depth(self):
+        rgb, corners = render()
+        centre = am.homography_center(corners)
+        depth = depth_of(900, RENDER_DEPTH_MM, centre)
+        result = self._detect(rgb, depth)
+        self.assertIsNone(result["rejection"])
+        size = result["selected"]["size"]
+        self.assertEqual(size["status"], "ok")
+        self.assertEqual(size["size_source"], "measured_from_depth")
+        self.assertAlmostEqual(size["black_square_mm"], 16.0, delta=1.0)
+        self.assertEqual(size["valid_corners"], 4)
+        self.assertLess(size["size_uncertainty_mm"], 0.5)
+
+    def test_size_out_of_range_is_rejected(self):
+        rgb, corners = render()
+        centre = am.homography_center(corners)
+        depth = depth_of(900, 1400, centre)   # projects the same sticker to ~48 mm
+        result = self._detect(rgb, depth)
+        self.assertIsNone(result["selected"])
+        self.assertEqual(result["rejection"], "size_out_of_range")
+        self.assertEqual(result["candidates"][0]["size"]["status"], "invalid")
+
+    def test_size_needs_three_valid_corners(self):
+        rgb, corners = render()
+        centre = am.homography_center(corners)
+        depth = depth_of(900, RENDER_DEPTH_MM, centre)
+        for corner in corners[:2]:
+            u, v = int(round(corner[0])), int(round(corner[1]))
+            depth[v - 3:v + 4, u - 3:u + 4] = 0
+        result = self._detect(rgb, depth)
+        self.assertIsNone(result["selected"])
+        self.assertEqual(result["rejection"], "size_insufficient_corners")
+        self.assertLessEqual(result["candidates"][0]["size"]["valid_corners"], 2)
+
+    def test_size_unstable_is_rejected(self):
+        # A keystoned quad with constant depth makes the measured 3D sides
+        # disagree; that is exactly the "estimate is not stable" case, and it is
+        # reported instead of selecting the median.
+        corners = np.array([[430.0, 430.0], [465.0, 430.0], [460.0, 470.0], [425.0, 470.0]])
+        depth = np.full((900, 900), RENDER_DEPTH_MM, np.uint16)
+        size = am.estimate_marker_size(
+            corners, depth, INTR,
+            {**CFG, "size_max_side_ratio": 1.1, "size_max_uncertainty_mm": 5.0})
+        self.assertEqual(size["status"], "invalid")
+        self.assertEqual(size["reason"], "size_unstable")
+        self.assertTrue(8.0 <= size["black_square_mm"] <= 40.0)
 
 
 class Centre(unittest.TestCase):
@@ -183,6 +253,11 @@ class FrameRecord(unittest.TestCase):
             self.assertIn(key, closed)
         self.assertFalse(closed["observation_is_direct_measurement"])
         self.assertIsNotNone(closed["skin_estimate_m"])
+        self.assertEqual(closed["marker"]["size"]["status"], "ok")
+        self.assertEqual(closed["marker"]["print"]["size_source"], "measured_from_depth")
+        self.assertAlmostEqual(closed["marker"]["print"]["black_square_mm"], 16.0,
+                               delta=1.0)
+        self.assertEqual(closed["marker"]["detector"]["auto_id"], True)
 
     def test_missing_marker_produces_a_reason_not_a_fallback(self):
         record = am.evaluate_frame(np.full((600, 600, 3), 255, np.uint8),
@@ -191,6 +266,115 @@ class FrameRecord(unittest.TestCase):
         self.assertEqual(record["status"], am.STATUS_FAILED)
         self.assertEqual(record["reason"], "no_marker_detected")
         self.assertIsNone(record["point_observed_m"])
+
+
+class HistoricalReplay(unittest.TestCase):
+    """The field sticker is not 16 mm; the measured size must be accepted."""
+
+    PREPARED = PROJECT_ROOT / "runtime/outputs/zp_capwitharuco/prepared"
+
+    @unittest.skipUnless((PROJECT_ROOT / "runtime/outputs/zp_capwitharuco/prepared").is_dir(),
+                         "historical zp prepared frames are not present")
+    def test_real_zp_frames_auto_id_and_measured_size(self):
+        for frame_id, state in (("closed_front_3", "closed"),
+                                ("open_front_3", "open")):
+            path = self.PREPARED / f"{frame_id}.npz"
+            if not path.is_file():
+                continue
+            with np.load(path, allow_pickle=False) as data:
+                rgb = data["rgb"]
+                depth = data["depth"]
+                intr = np.asarray(data["intrinsics"], dtype=np.float64).reshape(-1)
+            record = am.evaluate_frame(rgb, depth, intr, am.ArucoSpec(),
+                                       state=state, frame_id=frame_id)
+            self.assertEqual(record["status"], am.STATUS_OBSERVED, record.get("reason"))
+            self.assertEqual(record["detected_id"], 0)
+            size = record["marker"]["size"]
+            self.assertEqual(size["size_source"], "measured_from_depth")
+            self.assertTrue(8.0 <= size["black_square_mm"] <= 40.0,
+                            size["black_square_mm"])
+            self.assertGreaterEqual(size["valid_corners"], 3)
+            self.assertLess(size["size_uncertainty_mm"], 2.0)
+            self.assertEqual(record["marker"]["print"]["size_source"],
+                             "measured_from_depth")
+
+
+class _Frame:
+    """Duck-typed CapturedFrame: the live gate must not need pyorbbecsdk."""
+
+    def __init__(self, rgb, depth, ts=0.0):
+        self.rgb = rgb
+        self.depth = depth
+        self.intrinsics = INTR
+        self.host_monotonic_s = float(ts)
+
+
+class LiveGate(unittest.TestCase):
+    def test_gate_accepts_a_frame_and_records_attempts(self):
+        rgb, corners = render()
+        centre = am.homography_center(corners)
+        depth = depth_of(900, RENDER_DEPTH_MM, centre)
+        gate = am.evaluate_frames([_Frame(rgb, depth, 1.0)], "closed",
+                                  frame_id_prefix="live_closed")
+        self.assertEqual(gate["status"], am.STATUS_OBSERVED)
+        self.assertEqual(gate["detected_id"], 0)
+        self.assertEqual(len(gate["attempts"]), 1)
+        self.assertEqual(gate["attempts"][0]["status"], am.STATUS_OBSERVED)
+        self.assertEqual(gate["size"]["size_source"], "measured_from_depth")
+
+    def test_gate_selects_the_sharpest_valid_frame_and_keeps_failures(self):
+        rgb, corners = render()
+        centre = am.homography_center(corners)
+        good = depth_of(900, RENDER_DEPTH_MM, centre)
+        blank = np.full((900, 900), RENDER_DEPTH_MM, np.uint16)
+        frames = [_Frame(np.full((900, 900, 3), 255, np.uint8), blank, 0.0),
+                  _Frame(rgb, good, 1.0)]
+        gate = am.evaluate_frames(frames, "closed", frame_id_prefix="live_closed")
+        self.assertEqual(gate["status"], am.STATUS_OBSERVED)
+        self.assertEqual(len(gate["attempts"]), 2)
+        self.assertEqual(gate["attempts"][0]["status"], am.STATUS_FAILED)
+        self.assertEqual(gate["attempts"][0]["reason"], "no_marker_detected")
+        self.assertIn(gate["frame_id"], {a["frame_id"] for a in gate["attempts"]})
+
+    def test_gate_reports_no_marker(self):
+        blank = np.full((900, 900), RENDER_DEPTH_MM, np.uint16)
+        gate = am.evaluate_frames(
+            [_Frame(np.full((900, 900, 3), 255, np.uint8), blank)], "open")
+        self.assertEqual(gate["status"], am.STATUS_FAILED)
+        self.assertEqual(gate["reason"], "no_marker_detected")
+        self.assertIsNone(gate["frame_id"])
+
+    def test_failure_policy_is_one_place(self):
+        observed = {"status": am.STATUS_OBSERVED, "reason": None}
+        failed = {"status": am.STATUS_FAILED, "reason": "no_marker_detected"}
+        self.assertEqual(am.marker_gate_decision(observed, True, False), "continue")
+        self.assertEqual(am.marker_gate_decision(failed, False, False), "retake")
+        self.assertEqual(am.marker_gate_decision(failed, True, False), "abort")
+        self.assertEqual(am.marker_gate_decision(failed, True, True), "fallback")
+        self.assertEqual(am.marker_gate_decision(failed, False, True), "fallback")
+
+    def test_preview_line_has_id_size_or_reason(self):
+        rgb, corners = render()
+        centre = am.homography_center(corners)
+        depth = depth_of(900, RENDER_DEPTH_MM, centre)
+        det = am.detect_candidates(rgb, SPEC, CFG, depth=depth, intrinsics=INTR)
+        line = am.preview_marker_line(det)
+        self.assertIn("id=0", line)
+        self.assertIn("mm ok", line)
+        blank = am.detect_candidates(np.full((600, 600, 3), 255, np.uint8), SPEC, CFG)
+        self.assertIn("no_marker_detected", am.preview_marker_line(blank))
+
+    def test_multiple_ids_in_one_frame_are_rejected_by_the_gate(self):
+        canvas = 420
+        rgb = np.full((canvas, canvas, 3), 255, np.uint8)
+        first = am.sticker_image(SPEC, PROJECTED_PX_PER_MM)
+        second = am.sticker_image(am.ArucoSpec(target_id=7), PROJECTED_PX_PER_MM)
+        rgb[10:10 + first.shape[0], 10:10 + first.shape[1]] = np.dstack([first] * 3)
+        rgb[200:200 + second.shape[0], 200:200 + second.shape[1]] = np.dstack([second] * 3)
+        depth = np.full((canvas, canvas), RENDER_DEPTH_MM, np.uint16)
+        gate = am.evaluate_frames([_Frame(rgb, depth)], "closed")
+        self.assertEqual(gate["status"], am.STATUS_FAILED)
+        self.assertEqual(gate["reason"], "multiple_marker_ids")
 
 
 class PrintAssets(unittest.TestCase):

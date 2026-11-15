@@ -6,18 +6,20 @@ no model weights and no reconstruction are touched.
 """
 from __future__ import annotations
 
+import argparse
 import json
 import os
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import base64
 import unittest
 
 import numpy as np
 
 from loss_analysis import cli, objectives, terms
-from loss_analysis import adapter
+from loss_analysis import adapter, neck_adapter, optimizer
 from loss_analysis.recorder import IterationRecord, Recorder
 from loss_analysis.terms import (
     coverage_summary,
@@ -380,6 +382,7 @@ class EntryPointContract(unittest.TestCase):
             cwd=str(cwd or PACKAGE_ROOT),
             capture_output=True,
             text=True,
+            encoding="utf-8",
             timeout=120,
             env={**os.environ, "PYTHONPATH": str(PACKAGE_ROOT), "PYTHONIOENCODING": "utf-8"},
         )
@@ -463,6 +466,85 @@ class EntryPointContract(unittest.TestCase):
             # other dense sub-stages are simply absent from this fixture
             self.assertIn("dense.front_anchor_low_frequency", gap_stages)
             self.assertTrue((out / "report.md").is_file())
+            html = out / "report.html"
+            self.assertTrue(html.is_file())
+            page = html.read_text(encoding="utf-8")
+            self.assertTrue(page.startswith("<!DOCTYPE html>"))
+            self.assertIn('charset="utf-8"', page)
+            self.assertIn("求解器目标", page)
+            self.assertIn("缺口阶段", page)
+            self.assertIn("3.5", page)
+            # single-file report: no CDN, no external link, no side-car image refs
+            self.assertNotIn("http://", page)
+            self.assertNotIn("https://", page)
+            self.assertNotIn('src="figures', page)
+
+
+class HtmlReportContract(unittest.TestCase):
+    """The HTML report must stay single-file, escaped, and null-preserving."""
+
+    def _payload(self):
+        recorder = Recorder(run_label="html <test>", algorithm="fit", software_version="0")
+        recorder.add(IterationRecord(
+            stage="fit_c", iteration=1, tier="solver_objective", value=0.5,
+            phase="identity", decision="accepted",
+            notes=["<script>alert(1)</script>"],
+        ))
+        recorder.add(IterationRecord(
+            stage="fit_c", iteration=2, tier="solver_objective", value=None,
+            decision="rejected", notes=["missing is <b>not</b> zero"],
+        ))
+        recorder.gap("loop_base", "no objective <i>by design</i>",
+                     expected_tier="solver_objective")
+        return recorder.payload()
+
+    def test_html_escapes_dynamic_text_and_keeps_null(self):
+        from loss_analysis.html_report import build_analysis_html
+
+        page = build_analysis_html(
+            self._payload(), stage_catalogue=[], input_summary={}, extra_notes=[]
+        )
+        self.assertIn("<!DOCTYPE html>", page)
+        self.assertNotIn("<script>alert(1)</script>", page)
+        self.assertIn("&lt;script&gt;alert(1)&lt;/script&gt;", page)
+        self.assertIn("&lt;i&gt;by design&lt;/i&gt;", page)
+        self.assertIn("html &lt;test&gt;", page)
+        # a missing record renders as null, never as 0
+        self.assertIn('<span class="null">null</span>', page)
+        self.assertNotIn("http://", page)
+        self.assertNotIn("https://", page)
+
+    def test_figures_are_embedded_not_linked(self):
+        from loss_analysis.html_report import build_analysis_html
+
+        with tempfile.TemporaryDirectory() as name:
+            png = Path(name) / "fit_c.png"
+            png.write_bytes(base64.b64decode(
+                b"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAE"
+                b"hQGAhKmMIQAAAABJRU5ErkJggg=="
+            ))
+            page = build_analysis_html(
+                self._payload(), stage_catalogue=[], input_summary={}, figures=[png]
+            )
+        self.assertIn('src="data:image/png;base64,', page)
+        self.assertNotIn('src="fit_c', page)
+        self.assertNotIn('src="figures', page)
+
+    def test_diagnostic_tier_has_its_own_section(self):
+        from loss_analysis.html_report import build_analysis_html
+
+        metrics = {"closed_front_2": {
+            "metrics": {"status": "ok", "n_valid": 40, "mae_mm": 0.42, "rmse_mm": 0.55,
+                        "p95_mm": 0.9, "median_mm": 0.4, "max_mm": 1.2},
+            "coverage": {"n_required": 68, "coverage": 0.5882},
+        }}
+        page = build_analysis_html(
+            self._payload(), stage_catalogue=[], input_summary={}, metrics=metrics
+        )
+        self.assertIn("独立几何诊断", page)
+        self.assertIn("closed_front_2", page)
+        self.assertIn("非算法 loss", page)
+        self.assertIn("0.42", page)
 
 
 class JointFusionIngestion(unittest.TestCase):
@@ -580,6 +662,326 @@ class JointFusionIngestion(unittest.TestCase):
             skew = adapter.version_skew(root)
             self.assertFalse(skew["consistent"])
             self.assertEqual(skew["stated"]["reconstruction/dense/report.json"], "0.4.0")
+
+
+def _write_json(path: Path, payload: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+
+def _loss_payload() -> dict:
+    return {
+        "schema": "neck_direct.loss.v1",
+        "tier_note": "solver objective vs diagnostic",
+        "params": {"structure_gain": 1.10, "bridge_width_mm": 12.0,
+                   "seam_taper_ratio": 2.5, "mu_t_bridge": 0.15,
+                   "mu_t_body": 0.50, "anchor_near_A": 2.0},
+        "states": {
+            "closed": {
+                "iterations": [
+                    {"iter": 0, "energy": 10.0, "accepted": True,
+                     "energy_parts": {"data": 6.0, "bend": 2.0, "tangent": 1.0,
+                                      "anchor": 0.9, "small": 0.1},
+                     "line_search_alpha": 1.0, "samples": 100, "max_d_mm": 2.0,
+                     "step_max_mm": 1.2, "grad_max": 3.0, "grad_rel": 1.0,
+                     "energy_rel": 0.0},
+                    {"iter": 1, "energy": 9.0, "accepted": False,
+                     "energy_parts": {"data": 5.4, "bend": 1.8, "tangent": 0.9,
+                                      "anchor": 0.8, "small": 0.1},
+                     "line_search_alpha": 0.5, "samples": 100, "max_d_mm": 2.1,
+                     "step_max_mm": 0.2, "grad_max": 0.02, "grad_rel": 0.007,
+                     "energy_rel": 0.0},
+                ],
+                "n_iter": 2, "converged": True, "stop_reason": "energy_stationary",
+                "energy": 9.0, "n_free": 10, "n_fixed": 90, "data_samples": 100,
+                "residual_after": {"vertex_rms_mm": 0.222, "quad_rms_mm": 0.279,
+                                   "vertex_p95_mm": 0.5, "quad_p95_mm": 0.6,
+                                   "vertex_max_mm": 1.0, "quad_max_mm": 1.1,
+                                   "n_samples": 100, "n_samples_vertex": 40,
+                                   "n_samples_face": 60},
+            },
+            "open": {
+                "iterations": [
+                    {"iter": 0, "energy": 11.0, "accepted": True,
+                     "energy_parts": {"data": 6.6, "bend": 2.2, "tangent": 1.1,
+                                      "anchor": 1.0, "small": 0.1},
+                     "line_search_alpha": 1.0, "samples": 90, "max_d_mm": 2.4,
+                     "step_max_mm": 1.4, "grad_max": 3.4, "grad_rel": 1.0,
+                     "energy_rel": 0.0},
+                ],
+                "n_iter": 1, "converged": True, "stop_reason": "energy_stationary",
+                "energy": 11.0, "n_free": 10, "n_fixed": 90, "data_samples": 90,
+                "residual_after": {"vertex_rms_mm": 0.226, "quad_rms_mm": 0.280,
+                                   "n_samples": 90},
+            },
+        },
+        "remesh": {"passes": []},
+    }
+
+
+def _quick_payload(chosen: str) -> dict:
+    return {
+        "variant": "prior", "chosen": chosen, "variants": {},
+        "quick": {
+            "signed_crease": {
+                "closed": {"full_positive_max_deg": 21.45, "B_positive_max_deg": 14.81},
+                "open": {"full_positive_max_deg": 19.40, "B_positive_max_deg": 17.05},
+            },
+            "protection": {"fixed_vertices": 100, "fixed_max_mm": 0.00086, "pass": True},
+            "topology": {"pass": True},
+            "shared_topology": True,
+            "structure": {"closed": {"larynx_local": {"relief_mm": 5.10}},
+                          "open": {"larynx_local": {"relief_mm": 4.69}}},
+            "upper_band_0.925_0.97": {"input": {"vertices": 78},
+                                      "full": {"vertices": 78}, "no_increase": True},
+            "vertices": {"closed": 20009, "open": 20009},
+            "faces": {"closed": 39886, "open": 39886},
+            "pass": {"critical": True, "connection": False, "density_upper_band": True},
+        },
+    }
+
+
+def _dense_payload() -> dict:
+    return {"field_logs": {"front_anchor_regularized": {"history": [{
+        "outer": 1, "stage": "front_anchor_low_frequency",
+        "objective_before": 1.6, "objective_after": 1.5, "step_accepted": True,
+        "fixed_ray_diagnostic": {"before_mse_mm2": 1.1, "after_mse_mm2": 1.05,
+                                 "missing_before": 9, "missing_after": 10,
+                                 "ray_count": 1000, "policy": "strict-coverage"},
+        "safety": {"reason": None},
+    }]}}}
+
+
+def _landmarks_payload(t_center: float = 0.7637) -> dict:
+    return {
+        "schema": "head_rgbd.neck_landmarks.v1",
+        "states": {
+            "closed": {"status": "observed", "source": "aruco_marker",
+                       "frame_id": "closed_front_3",
+                       "larynx_center": {"t_center_used": t_center, "theta_used_deg": 0.0,
+                                         "t_gate": 0.9},
+                       "marker": {"print": {"target_id": 0, "black_square_mm": 33.4076,
+                                            "size_source": "measured_from_depth"}}},
+            "open": {"status": "observed", "source": "aruco_marker",
+                     "frame_id": "open_front_2",
+                     "larynx_center": {"t_center_used": 0.8012, "theta_used_deg": 0.0,
+                                       "t_gate": 0.95},
+                     "marker": {"print": {"target_id": 0, "black_square_mm": 32.9608,
+                                          "size_source": "measured_from_depth"}}},
+        },
+    }
+
+
+def _delivery_files(folder: Path) -> None:
+    folder.mkdir(parents=True, exist_ok=True)
+    for name in ("head_closed.obj", "head_open.obj"):
+        (folder / name).write_text("# fake obj\n", encoding="utf-8")
+    _write_json(folder / "anatomical_landmarks.json", {
+        "schema": "head_rgbd.delivery.anatomical_landmarks.v2",
+        "status": "usable",
+        "main_delivery_mesh_file": "head_closed.obj",
+    })
+    _write_json(folder / "manifest.json", {
+        "schema": "head_rgbd.delivery.manifest.v1",
+        "mesh": {"states": {"closed": {"path": "head_closed.obj"},
+                            "open": {"path": "head_open.obj"}}},
+    })
+
+
+def _baseline_tree(root: Path) -> dict[str, Path]:
+    result = root / "baseline" / "result"
+    _delivery_files(result / "final")
+    _delivery_files(result / "measured")
+    neck = root / "baseline" / "neck_direct_v2"
+    _write_json(neck / "build_direct.json", {
+        "params": {"structure_gain": 1.10, "bridge_width_mm": 12.0,
+                   "seam_taper_ratio": 2.5, "mu_t_bridge": 0.15,
+                   "mu_t_body": 0.50, "anchor_near_A": 2.0},
+        "structure": {"reference": {"primary": {"relief_mm": 4.43}}},
+        "journal": {"split_new_total": 0, "split_new_cap": 20,
+                    "vertices_original": 20018, "vertices_final": 20009,
+                    "merged_slots": 9},
+    })
+    _write_json(neck / "loss_direct.json", _loss_payload())
+    _write_json(result / "quick_check.json", _quick_payload(str(neck)))
+    _write_json(root / "baseline" / "neck_landmarks.json", _landmarks_payload())
+    _write_json(result / "run_report.json", {
+        "configuration": {"motion_lowerface_weight": 0.5, "bending_length_mm": 8.0,
+                          "low_bending_length_mm": 8.0}
+    })
+    dense = root / "base" / "dense"
+    _write_json(dense / "report.json", _dense_payload())
+    return {"result": result, "neck": neck, "dense": dense,
+            "landmarks": root / "baseline" / "neck_landmarks.json",
+            "root": root}
+
+
+def _optimizer_args(paths: dict[str, Path], out: Path, **overrides):
+    values = dict(
+        baseline_result=paths["result"], baseline_dense=paths["dense"],
+        baseline_neck=paths["neck"], baseline_trace=paths["neck"],
+        capture=None, output=out, candidate=None, limit=12, execute=False,
+        max_candidates=1, freeze_landmarks=False, neck_only_dense=False,
+        landmarks=paths["landmarks"], timeout_s=60, no_figures=True,
+    )
+    values.update(overrides)
+    return argparse.Namespace(**values)
+
+
+class NeckAdapterContract(unittest.TestCase):
+    def test_solver_trace_and_residual_are_separate_tiers(self):
+        with tempfile.TemporaryDirectory() as name:
+            neck = Path(name) / "neck"
+            _write_json(neck / "loss_direct.json", _loss_payload())
+            recorder = Recorder(run_label="neck", algorithm="neck_direct",
+                                software_version="0.2.0")
+            summary = neck_adapter.ingest_neck_direct(recorder, neck)
+            self.assertTrue(summary["present"])
+            solver = [r for r in recorder.iterations if r.tier == "solver_objective"]
+            diagnostic = [r for r in recorder.iterations if r.tier == "diagnostic"]
+            self.assertEqual(len(solver), 3)
+            self.assertEqual(len(diagnostic), 2)
+            first = solver[0]
+            # the parts split the solver objective inside one iteration
+            self.assertAlmostEqual(sum(first.terms.values()), first.value, places=9)
+            self.assertEqual(first.decision, "accepted")
+            self.assertEqual(solver[1].decision, "rejected")
+            # in-face residual is a diagnostic, never part of the energy
+            self.assertFalse(any(r.tier == "solver_objective" and
+                                 "vertex_rms_mm" in (r.terms or {})
+                                 for r in recorder.iterations))
+            for stage, meta in recorder.stage_meta.items():
+                if stage.startswith("neck_direct.fit_unified"):
+                    self.assertIn("not optimisation steps", " ".join(meta["notes"]))
+
+    def test_missing_trace_is_a_gap_not_zero(self):
+        with tempfile.TemporaryDirectory() as name:
+            recorder = Recorder(run_label="neck", algorithm="neck_direct",
+                                software_version="0.2.0")
+            summary = neck_adapter.ingest_neck_direct(recorder, Path(name))
+            self.assertFalse(summary["present"])
+            self.assertEqual(recorder.iterations, [])
+            self.assertTrue(recorder.gaps)
+            self.assertEqual(recorder.gaps[0].stage, "neck_direct")
+
+
+class OptimizerContract(unittest.TestCase):
+    def test_plan_is_bounded_and_does_not_execute(self):
+        with tempfile.TemporaryDirectory() as name:
+            paths = _baseline_tree(Path(name))
+            out = Path(name) / "out"
+            code = optimizer.run_optimizer(_optimizer_args(paths, out))
+            self.assertEqual(code, 0)
+            plan = json.loads((out / "plan.json").read_text(encoding="utf-8"))
+            self.assertLessEqual(len(plan["candidates"]), 12)
+            keys = {item["key"] for item in plan["candidates"]}
+            self.assertIn("neck_anchor_near_A_2.5", keys)
+            self.assertIn("base_bending_length_mm_9", keys)
+            self.assertFalse((out / "candidates").exists())
+            self.assertTrue((out / "report.html").is_file())
+            self.assertTrue((out / "candidates.csv").is_file())
+            page = (out / "report.html").read_text(encoding="utf-8")
+            self.assertIn("候选计划", page)
+            self.assertNotIn("http://", page)
+            # baseline residual comes from the supplied trace
+            summary = json.loads((out / "summary.json").read_text(encoding="utf-8"))
+            residual = summary["baseline_assessment"]["neck"]["target_residual"]
+            self.assertAlmostEqual(residual["mean_vertex_rms_mm"], 0.224, places=6)
+            with self.assertRaises(FileExistsError):
+                optimizer.run_optimizer(_optimizer_args(paths, out))
+
+    def test_hard_constraints_reject_marker_drift_and_protection(self):
+        with tempfile.TemporaryDirectory() as name:
+            paths = _baseline_tree(Path(name))
+            baseline = neck_adapter.assess(
+                dense_dir=paths["dense"], result_dir=paths["result"],
+                neck_dir=paths["neck"], landmarks_path=paths["landmarks"])
+            candidate = neck_adapter.assess(
+                dense_dir=paths["dense"], result_dir=paths["result"],
+                neck_dir=paths["neck"], landmarks_path=paths["landmarks"])
+            probe = optimizer._delivery_probe(paths["result"])
+            self.assertTrue(all(r["status"] == "pass" for r in
+                                optimizer.hard_constraints(baseline, candidate, probe)))
+            drifted = json.loads(json.dumps(candidate))
+            drifted["neck"]["markers"]["states"]["closed"]["t_center_used"] += 0.01
+            rows = optimizer.hard_constraints(baseline, drifted, probe)
+            self.assertEqual({r["name"]: r["status"] for r in rows}["marker semantics"], "fail")
+            weak = json.loads(json.dumps(candidate))
+            weak["neck"]["gates"]["protection"]["pass"] = False
+            rows = optimizer.hard_constraints(baseline, weak, probe)
+            self.assertEqual({r["name"]: r["status"] for r in rows}["protection"], "fail")
+            over = json.loads(json.dumps(candidate))
+            over["neck"]["remesh"]["split_new_total"] = 21
+            rows = optimizer.hard_constraints(baseline, over, probe)
+            self.assertEqual({r["name"]: r["status"] for r in rows}["split budget"], "fail")
+
+    def test_ranking_is_lexicographic_not_weighted_sum(self):
+        better_base = {"base": {"fixed_ray_after_mse_mm2": 1.00, "missing_after": 9},
+                       "neck": {"gates": {"connection_max_deg": 25.0},
+                                "target_residual": {"mean_vertex_rms_mm": 0.5,
+                                                    "mean_quad_rms_mm": 0.6}}}
+        better_neck = {"base": {"fixed_ray_after_mse_mm2": 1.10, "missing_after": 9},
+                       "neck": {"gates": {"connection_max_deg": 19.0},
+                                "target_residual": {"mean_vertex_rms_mm": 0.2,
+                                                    "mean_quad_rms_mm": 0.3}}}
+        ranked = sorted([better_neck, better_base], key=optimizer.ranking_key)
+        self.assertIs(ranked[0], better_base)
+        tie = json.loads(json.dumps(better_base))
+        tie["base"]["fixed_ray_after_mse_mm2"] = 1.10
+        ranked = sorted([better_neck, tie], key=optimizer.ranking_key)
+        self.assertIs(ranked[0], better_neck)
+
+    def test_cli_requires_explicit_baseline_paths(self):
+        completed = subprocess.run(
+            [sys.executable, "-m", "loss_analysis", "optimize"],
+            cwd=str(PACKAGE_ROOT), capture_output=True, text=True, encoding="utf-8",
+            env={**os.environ, "PYTHONPATH": str(PACKAGE_ROOT), "PYTHONIOENCODING": "utf-8"},
+        )
+        self.assertEqual(completed.returncode, 2)
+        self.assertIn("--baseline-result", completed.stderr)
+
+
+class AnalyzeWithNeckContract(unittest.TestCase):
+    """`analyze --neck-result` adds the direct neck trace without inventing gates."""
+
+    def _run(self, *args: str) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            [sys.executable, "-m", "loss_analysis", *args],
+            cwd=str(PACKAGE_ROOT), capture_output=True, text=True, encoding="utf-8",
+            env={**os.environ, "PYTHONPATH": str(PACKAGE_ROOT), "PYTHONIOENCODING": "utf-8"},
+        )
+
+    def test_neck_trace_and_gate_notes_are_read(self):
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name)
+            run = root / "run"
+            (run / "logs").mkdir(parents=True)
+            (run / "logs" / "02_identity_front_anchor.log").write_text(
+                "{'step': 0, 'phase': 'motion_initial', 'objective': 0.9}\n",
+                encoding="utf-8",
+            )
+            dense = run / "reconstruction" / "dense"
+            _write_json(dense / "report.json", _dense_payload())
+            paths = _baseline_tree(root)
+            out = root / "out"
+            completed = self._run(
+                "analyze", "--run", str(run), "--output", str(out), "--no-plots",
+                "--neck-result", str(paths["result"]),
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            records = json.loads((out / "records.json").read_text(encoding="utf-8"))
+            stages = {row["stage"] for row in records["iterations"]}
+            self.assertIn("neck_direct.fit_unified.closed", stages)
+            self.assertIn("neck_direct.fit_unified.open", stages)
+            self.assertIn("neck_direct.target_residual.closed", stages)
+            gap_stages = {gap["stage"] for gap in records["gaps"]}
+            self.assertNotIn("neck_direct", gap_stages)
+            notes = records["stages"]["neck_direct.gates"]["notes"]
+            self.assertTrue(any("not a numeric loss" in note for note in notes))
+            self.assertTrue(any("connection max positive crease" in note for note in notes))
+            page = (out / "report.html").read_text(encoding="utf-8")
+            self.assertIn("neck_direct.fit_unified.closed", page)
+            self.assertNotIn("http://", page)
 
 
 if __name__ == "__main__":

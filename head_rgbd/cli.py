@@ -19,6 +19,7 @@ from pathlib import Path
 import sys
 
 from head_rgbd import __version__
+from head_rgbd import rebuild_timing as rebuild_timing
 from head_rgbd.paths import (
     ensure_runtime_layout,
     resolve_runtime_dir,
@@ -56,6 +57,11 @@ def _add_capture_options(parser: argparse.ArgumentParser, defaults: dict) -> Non
     parser.add_argument("--views", action="append", help="state:view, default closed:front closed:left closed:right open:front")
     parser.add_argument("--auto", action="store_true", help="start each pose after --countdown-s without click/SPACE/Enter")
     parser.add_argument("--no-preview", action="store_true", help="hide the OpenCV preview window")
+    parser.add_argument(
+        "--allow-marker-fallback", action="store_true",
+        help="live: continue when a state's front ArUco marker is invalid; "
+             "the capture is marked not_usable and no pair-able delivery is written",
+    )
 
 
 def _add_neck_prominence_options(parser: argparse.ArgumentParser, defaults: dict) -> None:
@@ -82,15 +88,18 @@ def _add_neck_prominence_options(parser: argparse.ArgumentParser, defaults: dict
     )
     parser.add_argument(
         "--neck-algorithm",
-        choices=("observation", "manual_edit", "continuous_reference"),
-        default=prominence.get("algorithm", "continuous_reference"),
-        help="continuous_reference: non-negative reference-shape appearance bump (0.6 default); "
-             "manual_edit: older designed ridge; observation: subject-observed background+ridge fit",
+        choices=("reference_driven_neck_volume", "observation", "manual_edit",
+                 "continuous_reference"),
+        default=prominence.get("algorithm", "reference_driven_neck_volume"),
+        help="reference_driven_neck_volume (0.9 default): one unified cross-section-driven "
+             "neck volume and head/neck/shoulder transition; continuous_reference: historical "
+             "two-feature non-negative appearance bump; manual_edit: older designed ridge; "
+             "observation: subject-observed background+ridge fit",
     )
     parser.add_argument(
         "--neck-reference",
         default=prominence.get("reference_path"),
-        help="reference OBJ for continuous_reference (shape proportions only; default from config)",
+        help="reference OBJ for the reference-driven neck stage (shape only; default from config)",
     )
     parser.add_argument(
         "--neck-alpha",
@@ -142,6 +151,74 @@ def _add_neck_prominence_options(parser: argparse.ArgumentParser, defaults: dict
     )
 
 
+def _add_neck_direct_options(parser: argparse.ArgumentParser, defaults: dict) -> None:
+    """Neck direct-reshaping options shared by run / reconstruct / rebuild."""
+    parser.add_argument(
+        "--neck-landmarks", type=Path, default=None,
+        help="neck_landmarks.json from neck_landmark_aruco; when absent the "
+             "rebuild scans <output>/prepared front frames and the dense reference",
+    )
+    parser.add_argument(
+        "--neck-variant", choices=("auto", "prior", "no-prior"), default="prior",
+        help="default prior (C): anatomy-localized V larynx prior; "
+             "auto: try prior then fall back to no-prior above the crease limit; "
+             "no-prior: conservative direct solve",
+    )
+    parser.add_argument(
+        "--crease-limit", type=float, default=20.0,
+        help="full-edge / B positive crease maximum used to choose the neck variant",
+    )
+    parser.add_argument(
+        "--larynx-prior-ratio", type=float, default=0.35,
+        help="larynx prior amplitude = ratio x jaw reference",
+    )
+    parser.add_argument(
+        "--neck-gain", type=float, default=None,
+        help="structure gain on the reference relief (default: builder 1.10); "
+             "does not change the marker-derived centre or amplitude semantics",
+    )
+    parser.add_argument(
+        "--neck-bridge-width", type=float, default=None,
+        help="submental bridge geodesic width in mm (default: builder 12.0)",
+    )
+    parser.add_argument(
+        "--neck-seam-taper-ratio", type=float, default=None,
+        help="data-weight fade width from the protected head, in local edges "
+             "(default: builder 2.5)",
+    )
+    parser.add_argument(
+        "--neck-mu-t-bridge", type=float, default=None,
+        help="tangential prior in the submental bridge (default: builder 0.15)",
+    )
+    parser.add_argument(
+        "--neck-mu-t-body", type=float, default=None,
+        help="tangential prior in the neck body (default: builder 0.50)",
+    )
+    parser.add_argument(
+        "--neck-anchor-near-a", type=float, default=None,
+        help="extra hand-over stiffness near the fixed head "
+             "(default: builder 2.0)",
+    )
+    parser.add_argument("--base-only", action="store_true",
+                        help="stop after the base reconstruction (no neck reshape)")
+    parser.add_argument("--full-verify", action="store_true",
+                        help="build zero-topology/zero-new-vertex ablations and write "
+                             "the complete S0-S9 verification.json")
+    rebuild_defaults = defaults.get("rebuild") or {}
+    parser.add_argument(
+        "--minimal-output", action=argparse.BooleanOptionalAction,
+        default=bool(rebuild_defaults.get("minimal_output", True)),
+        help="fast path: no renders and no display-only duplicate meshes under "
+             "result/ (neck submeshes, base-head copies); final/, measured/, "
+             "quick_check.json and run_report.json are always written. "
+             "--full-verify still builds its explicit ablations.")
+    parser.add_argument(
+        "--render", action=argparse.BooleanOptionalAction,
+        default=bool(rebuild_defaults.get("render", False)),
+        help="write the standard neck and larynx renders (default off in the "
+             "fast path; --no-render is the explicit alias)")
+
+
 def _add_fit_options(parser: argparse.ArgumentParser, defaults: dict) -> None:
     reconstruction = defaults["reconstruction"]
     parser.add_argument("--device", choices=("cuda", "cpu"), default=reconstruction["device"])
@@ -149,6 +226,35 @@ def _add_fit_options(parser: argparse.ArgumentParser, defaults: dict) -> None:
     parser.add_argument("--steps", type=int, default=reconstruction["steps"])
     parser.add_argument("--front-steps", type=int, default=reconstruction.get("front_steps", 240),
                         help="frontal initialization budget; --steps controls the joint fit")
+    parser.add_argument(
+        "--phase-cuts", default=reconstruction.get("phase_cuts"),
+        help="comma-separated 4 interior fit_c phase fractions (default "
+             "0.167,0.458,0.625,0.833); both fit_c stages use them")
+    parser.add_argument(
+        "--correspondence-interval", type=int,
+        default=reconstruction.get("correspondence_interval", 10),
+        help="steps between fit_c surface correspondence refreshes; "
+             "phase boundaries refresh")
+    parser.add_argument(
+        "--motion-correspondence-interval", type=int,
+        default=reconstruction.get("motion_correspondence_interval", 10),
+        help="steps between motion_v2 surface correspondence refreshes; "
+             "phase boundaries refresh")
+    parser.add_argument(
+        "--motion-steps", type=int,
+        default=reconstruction.get("motion_steps", 80),
+        help="motion_v2 correction budget (fit_c budgets stay --steps/--front-steps)")
+    parser.add_argument(
+        "--motion-expression-start", type=int, default=None,
+        help="motion_v2 first expression/jaw step (default motion_steps//2)")
+    parser.add_argument(
+        "--motion-expression-end", type=int, default=None,
+        help="motion_v2 exclusive expression/jaw end step (default 3*motion_steps//4)")
+    parser.add_argument(
+        "--loss-mode", choices=("legacy", "batch"),
+        default=reconstruction.get("loss_mode", "legacy"),
+        help="fit_c/motion_v2 loss evaluation: legacy per-frame loop or "
+             "frame-dimension batch with identical weights")
     parser.add_argument("--motion-lowerface-weight", type=float,
                         default=reconstruction.get("motion_lowerface_weight", .5),
                         help="reliable open-front lower-face depth during expression correction; 0 disables it")
@@ -283,55 +389,165 @@ def _add_fit_options(parser: argparse.ArgumentParser, defaults: dict) -> None:
 
 
 def command_capture(args: argparse.Namespace) -> int:
-    from head_rgbd.capture_session import capture_session
+    from head_rgbd.capture_session import (
+        capture_session, CaptureStalled, MarkerValidationError)
 
-    folder = capture_session(
-        runtime=args.runtime,
-        session_name=args.session_name,
-        views=args.views,
-        frames_per_view=args.frames_per_view,
-        interval_s=args.interval_s,
-        warmup_s=args.warmup_s,
-        countdown_s=args.countdown_s,
-        preview=not args.no_preview,
-        auto=args.auto,
-    )
-    print(json.dumps({"capture": str(folder), "manifest": str(folder / "session.json")}, indent=2))
+    try:
+        folder = capture_session(
+            runtime=args.runtime,
+            session_name=args.session_name,
+            views=args.views,
+            frames_per_view=args.frames_per_view,
+            interval_s=args.interval_s,
+            warmup_s=args.warmup_s,
+            countdown_s=args.countdown_s,
+            preview=not args.no_preview,
+            auto=args.auto,
+            allow_marker_fallback=args.allow_marker_fallback,
+        )
+    except MarkerValidationError as exc:
+        print(json.dumps({"error": "marker_validation_failed",
+                          "reason": str(exc)}, ensure_ascii=False, indent=2))
+        return 2
+    except CaptureStalled as exc:
+        print(json.dumps({"error": "capture_stalled",
+                          "reason": str(exc)}, ensure_ascii=False, indent=2))
+        return 2
+    marker = (json.loads((folder / "marker_validation.json").read_text(encoding="utf-8"))
+              if (folder / "marker_validation.json").is_file() else {})
+    print(json.dumps({"capture": str(folder), "manifest": str(folder / "session.json"),
+                      "marker_status": marker.get("status"),
+                      "marker_states": {k: v.get("status") for k, v in
+                                        (marker.get("states") or {}).items()}},
+                     ensure_ascii=False, indent=2))
     return 0
 
 
+def _neck_after_base(args: argparse.Namespace, output, delivery):
+    """Default: direct neck reshaping on the just-built dense fit."""
+    if getattr(args, "base_only", False):
+        args.neck_return_code = 0
+        return None
+    from head_rgbd.rebuild import run_rebuild
+
+    output = Path(output)
+    rc = run_rebuild(
+        runtime=resolve_runtime_dir(args.runtime),
+        output=output,
+        dense=output / "reconstruction" / "dense",
+        base_delivery=Path(delivery),
+        args=args,
+    )
+    args.neck_return_code = int(rc)
+    return str(output / "result") if rc == 0 else None
+
+
 def command_run(args: argparse.Namespace) -> int:
-    from head_rgbd.capture_session import capture_session
+    from head_rgbd.capture_session import (
+        capture_session, CaptureStalled, MarkerValidationError)
 
     runtime = resolve_runtime_dir(args.runtime)
-    ensure_runtime_layout(runtime)
-    capture = capture_session(
-        runtime=runtime,
-        session_name=args.session_name,
-        views=args.views,
-        frames_per_view=args.frames_per_view,
-        interval_s=args.interval_s,
-        warmup_s=args.warmup_s,
-        countdown_s=args.countdown_s,
-        preview=not args.no_preview,
-        auto=args.auto,
-    )
+    layout = ensure_runtime_layout(runtime)
+    try:
+        capture = capture_session(
+            runtime=runtime,
+            session_name=args.session_name,
+            views=args.views,
+            frames_per_view=args.frames_per_view,
+            interval_s=args.interval_s,
+            warmup_s=args.warmup_s,
+            countdown_s=args.countdown_s,
+            preview=not args.no_preview,
+            auto=args.auto,
+            allow_marker_fallback=args.allow_marker_fallback,
+        )
+    except MarkerValidationError as exc:
+        print(json.dumps({"error": "marker_validation_failed",
+                          "reason": str(exc)}, ensure_ascii=False, indent=2))
+        return 2
+    except CaptureStalled as exc:
+        print(json.dumps({"error": "capture_stalled",
+                          "reason": str(exc)}, ensure_ascii=False, indent=2))
+        return 2
+    timer = rebuild_timing.RebuildTimer()   # capture has just returned
+    capture_manifest = json.loads((capture / "session.json").read_text(encoding="utf-8")) \
+        if (capture / "session.json").is_file() else {}
+    marker_status = capture_manifest.get("marker_status")
+    args.marker_status = marker_status
+    args.capture = str(capture)
     output = (
         Path(args.output).expanduser().resolve()
         if args.output
         else ensure_runtime_layout(runtime)["outputs"] / f"{capture.name}_reconstruction"
     )
-    code, delivery = run_pipeline(
-        runtime=runtime,
-        output=output,
-        capture=capture,
-        sequence=None,
-        args=args,
-        purpose="live_capture_to_offline_reconstruction",
-    )
-    _attach_capture(output / "run_report.json", capture, "passed")
-    print(json.dumps({"meshes": _mesh_paths(delivery), "manifest": str(delivery / "manifest.json")}, indent=2))
-    return code
+    timing_log = layout["outputs"] / "rebuild_timings.jsonl"
+    code = None
+    delivery = None
+    neck_result = None
+    neck_code = 0
+    error = None
+    try:
+        # The old appearance stage must not compete with the direct neck reshaping.
+        args.neck_prominence = "off"
+        code, delivery = run_pipeline(
+            runtime=runtime,
+            output=output,
+            capture=capture,
+            sequence=None,
+            args=args,
+            purpose="live_capture_to_offline_reconstruction",
+        )
+        _attach_capture(output / "run_report.json", capture, "passed")
+        neck_result = _neck_after_base(args, output, delivery) if code == 0 else None
+        neck_code = int(getattr(args, "neck_return_code", 0))
+        elapsed = timer.stop()
+        final_dir = str(Path(neck_result) / "final") if neck_result else None
+        measured_dir = str(Path(neck_result) / "measured") if neck_result else None
+        payload = {
+            "meshes": _mesh_paths(delivery),
+            "manifest": str(delivery / "manifest.json"),
+            "marker_status": getattr(args, "marker_status", marker_status),
+            "neck_result": neck_result,
+            "final": final_dir, "measured": measured_dir,
+            "final_sidecar": (str(Path(neck_result) / "final" / "anatomical_landmarks.json")
+                              if neck_result else None),
+            "measured_sidecar": (str(Path(neck_result) / "measured" / "anatomical_landmarks.json")
+                                 if neck_result else None),
+            "rebuild_elapsed_s": round(elapsed, 3),
+            "rebuild_elapsed_hms": rebuild_timing.format_elapsed(elapsed),
+            "timing_log": str(timing_log),
+        }
+        if neck_code != 0:
+            payload["error"] = "neck_stage_failed"
+            print(json.dumps(payload, ensure_ascii=False, indent=2))
+            return neck_code
+        print(json.dumps(payload, indent=2))
+        return code
+    except BaseException as exc:
+        error = f"{type(exc).__name__}: {exc}"
+        raise
+    finally:
+        status = ("exception" if error is not None
+                  else "fail" if (code not in (None, 0) or neck_code not in (None, 0))
+                  else "pass_base_only" if getattr(args, "base_only", False)
+                  else "pass")
+        record = rebuild_timing.build_record(
+            timer=timer, mode="live_run", capture=str(capture),
+            output=str(output), delivery=str(delivery) if delivery else None,
+            neck_result=str(neck_result) if neck_result else None,
+            marker_status=getattr(args, "marker_status", marker_status),
+            pipeline_code=code, neck_code=neck_code, status=status,
+            error=error, base_only=bool(getattr(args, "base_only", False)))
+        try:
+            written = rebuild_timing.write_timing(
+                log_path=timing_log, output_dir=output, record=record)
+            print(json.dumps({"rebuild_timing": written,
+                              "rebuild_elapsed_s": record["rebuild_elapsed_s"],
+                              "rebuild_elapsed_hms": record["rebuild_elapsed_hms"]},
+                             ensure_ascii=False), flush=True)
+        except Exception as timing_exc:
+            print(f"rebuild timing write failed: {type(timing_exc).__name__}: {timing_exc}",
+                  flush=True)
 
 
 def command_reconstruct(args: argparse.Namespace) -> int:
@@ -346,6 +562,9 @@ def command_reconstruct(args: argparse.Namespace) -> int:
     # folder is imported inside the run and its provenance lands in the delivery.
     capture_dir = Path(args.capture).expanduser().resolve() if args.capture else None
     recorded = capture_dir is not None and (capture_dir / "session.json").is_file()
+    # The default is base reconstruction + direct neck reshaping; the old
+    # reference-driven neck volume is not part of this entry.
+    args.neck_prominence = "off"
     code, delivery = run_pipeline(
         runtime=runtime,
         output=output,
@@ -357,8 +576,70 @@ def command_reconstruct(args: argparse.Namespace) -> int:
     )
     if recorded:
         _attach_capture(output / "run_report.json", capture_dir, "passed")
-    print(json.dumps({"meshes": _mesh_paths(delivery), "manifest": str(delivery / "manifest.json")}, indent=2))
+    neck_result = _neck_after_base(args, output, delivery) if code == 0 else None
+    if getattr(args, "neck_return_code", 0) != 0:
+        print(json.dumps({"error": "neck_stage_failed"}, indent=2))
+        return int(args.neck_return_code)
+    final_dir = str(Path(neck_result) / "final") if neck_result else None
+    measured_dir = str(Path(neck_result) / "measured") if neck_result else None
+    print(json.dumps({"meshes": _mesh_paths(delivery),
+                      "manifest": str(delivery / "manifest.json"),
+                      "marker_status": getattr(args, "marker_status", None),
+                      "neck_result": neck_result,
+                      "final": final_dir, "measured": measured_dir},
+                     indent=2))
     return code
+
+
+def command_rebuild(args: argparse.Namespace) -> int:
+    """One-click: locked head reconstruction + direct neck reshaping."""
+    from head_rgbd.rebuild import run_base_and_rebuild, run_rebuild
+
+    runtime = resolve_runtime_dir(args.runtime)
+    layout = ensure_runtime_layout(runtime)
+    if args.dense:
+        dense = Path(args.dense).expanduser().resolve()
+        if not (dense / "parameters.npz").exists():
+            raise FileNotFoundError(f"dense reconstruction not found: {dense}")
+        output = (
+            Path(args.output).expanduser().resolve()
+            if args.output
+            else dense.parents[1] / "rebuild"
+        )
+        base = dense.parents[1] / "delivery"
+        base_delivery = base if (base / "manifest.json").is_file() else None
+        rc = run_rebuild(runtime=runtime, output=output, dense=dense,
+                         base_delivery=base_delivery, args=args)
+        if rc == 0:
+            print(json.dumps({"result": str(output / "result"),
+                              "final": str(output / "result" / "final"),
+                              "measured": str(output / "result" / "measured"),
+                              "marker_status": getattr(args, "marker_status", None)},
+                             indent=2))
+        return rc
+    if args.output:
+        output = Path(args.output).expanduser().resolve()
+    else:
+        stem = Path(args.capture or args.sequence).resolve().name
+        output = layout["outputs"] / f"{stem}_rebuild"
+    capture_dir = Path(args.capture).expanduser().resolve() if args.capture else None
+    recorded = capture_dir is not None and (capture_dir / "session.json").is_file()
+    sequence = Path(args.sequence).expanduser().resolve() if args.sequence else None
+    rc = run_base_and_rebuild(
+        runtime=runtime,
+        output=output,
+        capture=capture_dir,
+        sequence=sequence,
+        args=args,
+        capture_is_recorded_session=recorded,
+    )
+    if rc == 0:
+        print(json.dumps({"result": str(output / "result"),
+                          "final": str(output / "result" / "final"),
+                          "measured": str(output / "result" / "measured"),
+                          "marker_status": getattr(args, "marker_status", None)},
+                         indent=2))
+    return rc
 
 
 def command_export(args: argparse.Namespace) -> int:
@@ -465,7 +746,9 @@ def build_parser() -> argparse.ArgumentParser:
             "examples\n"
             "  headrgbd.cmd run\n"
             "  headrgbd.cmd capture --session-name subject1\n"
-            "  headrgbd.cmd reconstruct --capture runtime/captures/<session>\n"
+            "  headrgbd.cmd rebuild --capture runtime/captures/<session> --output runtime/outputs/<name>\n"
+            "  headrgbd.cmd rebuild --dense runtime/outputs/<name>/reconstruction/dense\n"
+            "  headrgbd.cmd reconstruct --capture runtime/captures/<session>   # default C direct; --base-only for base\n"
             "  headrgbd.cmd device\n"
         ),
     )
@@ -475,11 +758,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     run = sub.add_parser(
         "run",
-        help="capture a guided session, reconstruct and export closed + open meshes",
+        help="capture a guided session, reconstruct, direct-neck reshape and export",
     )
     _add_capture_options(run, defaults)
     _add_fit_options(run, defaults)
-    _add_neck_prominence_options(run, defaults)
+    _add_neck_direct_options(run, defaults)
     run.add_argument("--output", type=Path, help="run directory (default: runtime/outputs/<capture>_reconstruction)")
     run.set_defaults(func=command_run)
 
@@ -489,7 +772,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     reconstruct = sub.add_parser(
         "reconstruct",
-        help="rebuild an existing capture (session.json) or prepared sequence.json",
+        help="rebuild an existing capture/sequence, then direct-neck reshape "
+             "(default C prior; --base-only for the base head)",
     )
     inputs = reconstruct.add_mutually_exclusive_group(required=True)
     inputs.add_argument("--capture", type=Path, help="capture folder containing session.json")
@@ -501,8 +785,31 @@ def build_parser() -> argparse.ArgumentParser:
         help="accept archives without a per-session calibration record and mark them unverified",
     )
     _add_fit_options(reconstruct, defaults)
-    _add_neck_prominence_options(reconstruct, defaults)
+    _add_neck_direct_options(reconstruct, defaults)
     reconstruct.set_defaults(func=command_reconstruct)
+
+    rebuild = sub.add_parser(
+        "rebuild",
+        help="one-click: locked head reconstruction + direct neck reshaping (recommended)",
+    )
+    rebuild_inputs = rebuild.add_mutually_exclusive_group(required=True)
+    rebuild_inputs.add_argument("--capture", type=Path,
+                                 help="capture folder (session.json or raw acquisition)")
+    rebuild_inputs.add_argument("--sequence", type=Path, help="prepared sequence.json")
+    rebuild_inputs.add_argument(
+        "--dense", type=Path,
+        help="existing .../reconstruction/dense; skips the base fit and only rebuilds the neck",
+    )
+    rebuild.add_argument("--output", type=Path,
+                         help="run directory (default: runtime/outputs/<stem>_rebuild)")
+    rebuild.add_argument(
+        "--allow-unverified-alignment",
+        action="store_true",
+        help="accept archives without a per-session calibration record and mark them unverified",
+    )
+    _add_fit_options(rebuild, defaults)
+    _add_neck_direct_options(rebuild, defaults)
+    rebuild.set_defaults(func=command_rebuild)
 
     export = sub.add_parser(
         "export",
@@ -532,7 +839,7 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
-    if args.command in ('run', 'reconstruct'):
+    if args.command in ('run', 'reconstruct', 'rebuild'):
         if min(args.steps, args.front_steps) < 40 or args.mid_rounds < 0:
             parser.error('fitting steps must be >= 40 and mid rounds must be nonnegative')
         if not 0 <= args.motion_lowerface_weight < float('inf'):

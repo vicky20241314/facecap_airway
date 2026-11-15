@@ -1,0 +1,6 @@
+{
+  "note": "P1c probe: no step cut, motion untouched; only the fit_c plateau-phase correspondence interval widens to 20 (identity_large keeps 10).",
+  "common": ["--correspondence-interval", "20", "--motion-correspondence-interval", "10"],
+  "base": [],
+  "full": []
+}

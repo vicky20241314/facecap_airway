@@ -1,0 +1,6 @@
+{
+  "note": "P2: frame-dimension batch loss on top of the accepted P1 fast-path defaults (P1 values live in config/defaults.json after its validation).",
+  "common": ["--loss-mode", "batch"],
+  "base": [],
+  "full": []
+}

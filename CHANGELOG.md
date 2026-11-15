@@ -1,5 +1,65 @@
 # Changelog
 
+## 0.9.0 - 2026-11-12
+
+**Public default switched** to `reference_driven_neck_volume`
+(`head_rgbd/neck_volume.py`, called directly by `pipeline.export_delivery`).
+This is a complete replacement of the accumulated local laryngeal sculpting,
+not an additional optional mode. Delivered closed/open meshes and report:
+`docs/NECK_VOLUME_AND_TRANSITION_REPORT.html`,
+`runtime/outputs/neck_volume_transition_20261112_234500/final/head_closed_m.obj`,
+`.../final/head_open_m.obj` (metres, 79,936 vertices / 159,616 faces, shared topology).
+
+- Defect attribution: horizontal ring grooves came from the `neck_dual`
+  two-feature non-negative field support window / plateau / protection band;
+  step-like ridges from the 0.6 -> 0.7 -> 0.8 stacked local sculpts;
+  longitudinal facets from the base template's ~40 vertices per neck ring.
+  All three are removed by rebuilding from the saved UNSHAPED dense baseline.
+- Scale fix: `head_scale.reference_head_dimensions` used the front-most lower
+  face point and actually selected the nose tip (y=+1.52 mm), giving the fake
+  H_head 139.68 mm and the 1.6368 longitudinal scale. Canonical detector is now
+  the submental break of the midline anterior profile (menton y=-84.481 mm,
+  H_head 225.679 mm). Same-protocol crown-to-menton band for both heads:
+  H/W/D ratios 1.0131 / 1.0764 / 1.0987. The "reference head is flatter"
+  conclusion is withdrawn; the old values are kept only as `head_legacy_080_bug`.
+  The hardcoded centre vertex 15571 and the old ROI bounds are no longer used.
+- Unified low-frequency model: bottom-cut plane -> axial h -> centreline ->
+  multi-level section targets (width, depth, area, centre offset, front/side/back
+  radii, adjacent-section rate) -> one C2 radial field s(theta,h) -> head/neck
+  and neck/shoulder blending -> broad C2 submental fill -> optional continuous
+  natural detail. Controlled inward (mid neck) and outward (root) motion;
+  no global volume conservation; no non-negative-displacement rule.
+- Expanded editable region: face/jaw/occiput identity is frozen, but the
+  submental tissue, both neck sides, posterior neck (template completion),
+  neck root and existing shoulder/chest all participate. The bottom cut ring
+  keeps two closed boundary loops with bounded IN-PLANE motion only
+  (max 5.16 mm, axial component 0.0 mm); 124 -> 248 boundary edges after the
+  consistent 1->4 subdivision, split-midpoint deviation <= 1e-4 mm.
+- Consistent uniform 1->4 subdivision of the whole mesh, then positions are
+  re-solved from the smooth target contour (not just more triangles, not a
+  surface smoothing pass). Low-frequency regularization is applied to the
+  DISPLACEMENT FIELD with identity vertices held fixed.
+- closed/open: one shared closed/neutral design transferred by vertex
+  correspondence; each state uses its own coordinates, landmarks, normals and
+  guards; state-local jaw guard recorded separately. Topology identical.
+- Measured geometry: max displacement 8.24 mm, 5,028 moved vertices,
+  1,271 inward / 3,757 outward; cross-section depth +3..15 mm, area
+  +1,000..1,800 mm2; zero normal reversals, zero non-manifold/inconsistent
+  edges, zero degenerate/slender faces, max edge growth 1.17, identity
+  displacement 0.0 mm, OBJ read-back <= 1e-9 m.
+- A/B/C evidence: A = current 0.8 delivery, B = volume only, C = B + 1.35 mm
+  continuous natural detail; identical view/light/material, flat and smooth
+  shading, physical and head-normalised scale, 33 renders. 16/16 checks pass.
+- Public wiring: `config/defaults.json`, `VERSION` (0.9.0), `head_rgbd/head_scale.py`,
+  `head_rgbd/cli.py` (new `--neck-algorithm` choice and default),
+  `head_rgbd/pipeline.py` (new unified delivery branch + manifest/neck_prominence
+  payload), `assets/neck_reference/identity_rest_20261109_asset.json`,
+  `tests/test_head_scale.py`, `tests/test_neck_volume.py`, README, CHANGELOG.
+  Historical `continuous_reference` remains available via CLI only.
+- Flags: `editing_mode=true`, `geometry_source=reference_driven_neck_volume`,
+  `subject_observation_matched=false`. Reference-driven appearance design plus
+  template completion is explicitly NOT a measured subject neck/shoulder.
+
 ## 0.8.0-candidate - 2026-11-12
 
 Head-scale proportion audit and closest-safe two-feature meshes. **Not the public

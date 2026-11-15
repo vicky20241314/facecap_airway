@@ -1,0 +1,6 @@
+{
+  "note": "P0: fast-path defaults (minimal_output=true, render=false). No algorithm change.",
+  "common": [],
+  "base": [],
+  "full": []
+}

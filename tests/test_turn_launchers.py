@@ -44,7 +44,10 @@ def launch(project, suffix, arguments, record, code=0):
         extra = " " + subprocess.list2cmdline(arguments) if arguments else ""
         command = f'"{os.environ["COMSPEC"]}" /d /s /c ""{script}"{extra}"'
     else:
-        command = [shutil.which("pwsh.exe"), "-NoProfile", "-NonInteractive", "-ExecutionPolicy",
+        pwsh = shutil.which("pwsh.exe") or shutil.which("powershell.exe")
+        if pwsh is None:
+            pytest.skip("PowerShell is not available in this environment")
+        command = [pwsh, "-NoProfile", "-NonInteractive", "-ExecutionPolicy",
                    "Bypass", "-File", str(script), *arguments]
     return subprocess.run(command, cwd=project.parent, env=env, input="\n",
                           capture_output=True, encoding="utf-8", errors="replace", timeout=20)

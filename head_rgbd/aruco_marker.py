@@ -70,6 +70,10 @@ class ArucoSpec:
     sticker_mm: float | None = None
     thickness_mm: float = DEFAULT_STICKER_THICKNESS_MM
     thickness_source: str = "nominal, not measured"
+    # Detection records carry the measured black-square size and its source;
+    # print assets keep the nominal values unless the caller sets these.
+    size_source: str = "nominal"
+    size_uncertainty_mm: float | None = None
 
     def __post_init__(self):
         if self.sticker_mm is None:
@@ -110,6 +114,9 @@ class ArucoSpec:
             "sticker_mm": round(self.sticker_mm, 4),
             "thickness_mm": round(self.thickness_mm, 4),
             "thickness_source": self.thickness_source,
+            "size_source": self.size_source,
+            "size_uncertainty_mm": (None if self.size_uncertainty_mm is None
+                                    else round(float(self.size_uncertainty_mm), 4)),
             "size_definition": "black_square_mm is the outer edge of the black 6x6 cell block",
         }
 
@@ -241,12 +248,22 @@ def blur_score(gray: np.ndarray, corners: np.ndarray, pad: int = 4) -> float:
 
 # -------------------------------------------------------------------- detection
 def detect_candidates(rgb: np.ndarray, spec: ArucoSpec, cfg: dict[str, Any] | None = None,
-                      *, subpix: bool = True) -> dict[str, Any]:
-    """Detect every candidate and record why each was kept or rejected.
+                      *, subpix: bool = True, depth: np.ndarray | None = None,
+                      intrinsics: np.ndarray | None = None) -> dict[str, Any]:
+    """Detect every candidate, auto-identify it and record why it was selected.
 
     The detector returns markers in image order, which is not a selection rule.
-    Every candidate is logged with its id, corners and the reason it did or did
-    not become the target.
+    The target ID is **not** taken from ``spec``: any ``DICT_4X4_50`` ID is
+    accepted, and the physical black-square size is estimated from depth and the
+    four 3D corners when ``depth``/``intrinsics`` are supplied.  The old
+    ``ArucoSpec.target_id`` remains the *print* asset ID; detection is automatic.
+
+    Selection is deliberately conservative:
+
+    * two different IDs in the frame -> ``multiple_marker_ids`` (no picking by
+      order or quality);
+    * two copies of the same ID -> ``duplicate_target_id``;
+    * one ID with a quality or size failure -> that explicit reason, no target.
     """
     cfg = dict(cfg or {})
     if rgb.ndim == 3:
@@ -263,26 +280,35 @@ def detect_candidates(rgb: np.ndarray, spec: ArucoSpec, cfg: dict[str, Any] | No
         quad = np.asarray(corners, dtype=np.float64).reshape(4, 2)
         geometry = quad_geometry(quad, spec)
         ok, reason = quality_gate(geometry, cfg)
-        if int(marker_id) != int(spec.target_id):
-            ok, reason = False, "wrong_id"
+        size = None
+        if depth is not None and intrinsics is not None:
+            size = estimate_marker_size(quad, depth, intrinsics, cfg)
+            if ok and cfg.get("enforce_size", True) and size["status"] != "ok":
+                ok, reason = False, size["reason"]
         entry = {
             "index": index,
             "detected_id": int(marker_id),
-            "expected_id": int(spec.target_id),
+            "expected_id": None,
+            "auto_id": True,
             "corners_px": quad.tolist(),
             "centre_px": geometry["centre_px"],
             "geometry": geometry,
             "blur_score": round(blur_score(gray, quad), 3),
+            "size": size or {"status": "not_evaluated",
+                             "reason": "depth_not_supplied",
+                             "size_source": None},
             "accepted": bool(ok),
             "rejection": reason,
         }
         candidates.append(entry)
     accepted = [c for c in candidates if c["accepted"]]
+    detected_ids = [c["detected_id"] for c in candidates]
     payload = {
         "schema": "head_rgbd.aruco_detection.v1",
-        "markers": [{"id": c["detected_id"], "corners_px": c["corners_px"]} for c in candidates],
+        "markers": [{"id": c["detected_id"], "corners_px": c["corners_px"]}
+                    for c in candidates],
         "candidates": candidates,
-        "detected_ids": [c["detected_id"] for c in candidates],
+        "detected_ids": detected_ids,
         "selected": None,
         "rejection": None,
         "detector": detector_characteristics(subpix),
@@ -290,15 +316,18 @@ def detect_candidates(rgb: np.ndarray, spec: ArucoSpec, cfg: dict[str, Any] | No
     if not candidates:
         payload["rejection"] = "no_marker_detected"
         return payload
-    if len(accepted) > 1:
-        # Two accepted copies of the target: the correspondence is not unique, so
-        # the frame is rejected rather than resolved by detector order.
+    unique_ids = sorted(set(detected_ids))
+    if len(unique_ids) > 1:
+        # Multiple physical IDs are not disambiguated by detector order or
+        # sharpness.  The operator must keep one sticker in view.
+        payload["rejection"] = "multiple_marker_ids"
+        return payload
+    if len(candidates) > 1:
+        # Two copies of the same ID are still ambiguous.
         payload["rejection"] = "duplicate_target_id"
         return payload
     if not accepted:
-        target_seen = [c for c in candidates if c["detected_id"] == spec.target_id]
-        payload["rejection"] = ("target_marker_failed_quality" if target_seen
-                                else "target_id_not_found")
+        payload["rejection"] = candidates[0]["rejection"] or "marker_rejected"
         return payload
     payload["selected"] = accepted[0]
     return payload
@@ -309,7 +338,9 @@ def detector_characteristics(subpix: bool = True) -> dict[str, Any]:
         "dictionary": DICTIONARY_NAME,
         "opencv_version": cv2.__version__,
         "corner_refinement": ("CORNER_REFINE_SUBPIX" if subpix else "CORNER_REFINE_NONE"),
-        "target_id": DEFAULT_TARGET_ID,
+        "auto_id": True,
+        "target_id": None,
+        "id_range": [0, 49],
     }
 
 
@@ -366,6 +397,104 @@ def centre_depth(centre_px: list[float], depth: np.ndarray, intr: np.ndarray,
         "valid_px": int(len(values)),
         "max_local_jump_mm": max_jump,
     }
+
+
+# --------------------------------------------------------------- automatic size
+def _corner_depth_mm(corner_px, depth: np.ndarray, cfg: dict[str, Any]) -> dict[str, Any]:
+    """Median depth at one marker corner, with hole/jump rejection.
+
+    The corner sits on the outer edge of the black square.  A small window is
+    used instead of one pixel because the printed corner can fall between
+    pixels; invalid neighbours are not skipped/re-normalised, and a window that
+    spans two surfaces is rejected rather than averaged.
+    """
+    half = int(cfg.get("size_corner_window_half", 1))
+    max_jump = float(cfg.get("size_corner_max_jump_mm", 4.0))
+    height, width = depth.shape[:2]
+    u, v = int(round(float(corner_px[0]))), int(round(float(corner_px[1])))
+    if not (0 <= u < width and 0 <= v < height):
+        return {"depth_mm": None, "reason": "corner_outside_image"}
+    window = depth[max(v - half, 0):v + half + 1,
+                   max(u - half, 0):u + half + 1].astype(np.float64)
+    valid = window > 0
+    if not valid.any():
+        return {"depth_mm": None, "reason": "corner_depth_hole", "valid_px": 0}
+    values = window[valid]
+    spread = float(values.max() - values.min())
+    if spread > max_jump:
+        return {"depth_mm": None, "reason": "corner_depth_jump",
+                "spread_mm": round(spread, 4), "valid_px": int(len(values))}
+    return {"depth_mm": float(np.median(values)), "reason": None,
+            "spread_mm": round(spread, 4), "valid_px": int(len(values))}
+
+
+def estimate_marker_size(corners: np.ndarray, depth: np.ndarray,
+                         intrinsics: np.ndarray,
+                         cfg: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Black-square edge length (mm) from depth + the four 3D corners.
+
+    The detector's quad spans the outer edge of the black 6x6 cell block, so the
+    median 3D side length is the physical black-square size.  This is a
+    *measurement*, not the nominal print size: the field sticker may be larger
+    or smaller than the PDF (the historical ``zp_capwitharuco`` sticker measured
+    ~33.6 mm while its sidecar said 16 mm).
+
+    Validity follows the spec: at least 3 valid corners, size 8-40 mm, and a
+    stable estimate (side ratio / half-range below the configured limits).
+    ``size_source=measured_from_depth`` even when the estimate is rejected, so
+    the failure is auditable.
+    """
+    cfg = dict(cfg or {})
+    quad = np.asarray(corners, dtype=np.float64).reshape(4, 2)
+    corner_info = [_corner_depth_mm(point, depth, cfg) for point in quad]
+    valid = [i for i, info in enumerate(corner_info) if info["depth_mm"] is not None]
+    base = {"size_source": "measured_from_depth",
+            "valid_corners": int(len(valid)),
+            "corner_depths": corner_info}
+    if len(valid) < 3:
+        return {**base, "status": "invalid", "reason": "size_insufficient_corners",
+                "black_square_mm": None, "size_uncertainty_mm": None,
+                "side_lengths_mm": []}
+    points: list[list[float] | None] = []
+    for index in range(4):
+        info = corner_info[index]
+        points.append(None if info["depth_mm"] is None else
+                      backproject_centre(quad[index], info["depth_mm"], intrinsics))
+    sides: list[float] = []
+    side_info: list[dict[str, Any]] = []
+    for index in range(4):
+        nxt = (index + 1) % 4
+        if points[index] is None or points[nxt] is None:
+            continue
+        length = float(np.linalg.norm(np.asarray(points[index]) -
+                                      np.asarray(points[nxt])) * 1000.0)
+        sides.append(length)
+        side_info.append({"edge": [index, nxt], "mm": round(length, 4)})
+    if len(sides) < 2:
+        return {**base, "status": "invalid", "reason": "size_insufficient_sides",
+                "black_square_mm": None, "size_uncertainty_mm": None,
+                "side_lengths_mm": [round(v, 4) for v in sides]}
+    sides_arr = np.asarray(sides, dtype=np.float64)
+    size = float(np.median(sides_arr))
+    spread = float(sides_arr.max() - sides_arr.min())
+    uncertainty = 0.5 * spread
+    ratio = float(sides_arr.max() / max(sides_arr.min(), 1e-9))
+    min_mm = float(cfg.get("min_black_square_mm", 8.0))
+    max_mm = float(cfg.get("max_black_square_mm", 40.0))
+    max_ratio = float(cfg.get("size_max_side_ratio", 1.30))
+    max_unc = float(cfg.get("size_max_uncertainty_mm", 2.0))
+    status, reason = "ok", None
+    if size < min_mm or size > max_mm:
+        status, reason = "invalid", "size_out_of_range"
+    elif ratio > max_ratio or uncertainty > max_unc:
+        status, reason = "invalid", "size_unstable"
+    return {**base, "status": status, "reason": reason,
+            "black_square_mm": round(size, 4),
+            "size_uncertainty_mm": round(uncertainty, 4),
+            "side_lengths_mm": [round(float(v), 4) for v in sides],
+            "side_ratio": round(ratio, 4),
+            "side_info": side_info,
+            "min_black_square_mm": min_mm, "max_black_square_mm": max_mm}
 
 
 def _fit_plane(points: np.ndarray) -> dict[str, Any]:
@@ -560,6 +689,97 @@ if __name__ == "__main__":
 
 
 # ----------------------------------------------------------------- frame record
+# --------------------------------------------------------------- live gate
+def _frame_attr(frame: Any, name: str, default: Any = None) -> Any:
+    if isinstance(frame, dict):
+        return frame.get(name, default)
+    return getattr(frame, name, default)
+
+
+def _compact_marker_record(record: dict[str, Any]) -> dict[str, Any]:
+    marker = record.get("marker") or {}
+    size = marker.get("size") or {}
+    return {
+        "frame_id": record.get("frame_id"),
+        "status": record.get("status"),
+        "reason": record.get("reason"),
+        "blur_score": record.get("blur_score"),
+        "detected_id": record.get("detected_id"),
+        "detected_ids": marker.get("detected_ids"),
+        "black_square_mm": size.get("black_square_mm"),
+        "size_source": size.get("size_source"),
+        "size_uncertainty_mm": size.get("size_uncertainty_mm"),
+        "centre_px": record.get("centre_px"),
+    }
+
+
+def evaluate_frames(frames, state: str, spec: ArucoSpec | None = None,
+                    cfg: dict[str, Any] | None = None,
+                    frame_id_prefix: str | None = None) -> dict[str, Any]:
+    """Live front-frame gate: best sharpness among frames with a valid marker.
+
+    This is the same ``evaluate_frame`` used by the prepared recheck; the live
+    gate is advisory only.  A frame with no marker contributes its explicit
+    failure reason to ``attempts`` and never becomes a target.
+    """
+    spec = spec or ArucoSpec()
+    attempts: list[dict[str, Any]] = []
+    best: tuple[float, dict[str, Any]] | None = None
+    for index, frame in enumerate(frames):
+        frame_id = f"{frame_id_prefix or state}_f{index}"
+        record = evaluate_frame(
+            np.asarray(_frame_attr(frame, "rgb")),
+            np.asarray(_frame_attr(frame, "depth")),
+            np.asarray(_frame_attr(frame, "intrinsics"), dtype=np.float64).reshape(-1),
+            spec, state=state, frame_id=frame_id, cfg=cfg,
+            timestamp={"host_monotonic_s": float(_frame_attr(frame, "host_monotonic_s", 0.0) or 0.0)},
+        )
+        compact = _compact_marker_record(record)
+        compact["index"] = index
+        attempts.append(compact)
+        if record.get("status") == STATUS_OBSERVED:
+            score = float(record.get("blur_score") or 0.0)
+            if best is None or score > best[0]:
+                best = (score, compact)
+    if best is None:
+        reason = next((a["reason"] for a in attempts if a["reason"]),
+                      "no_frames" if not attempts else "no_front_frame_with_valid_marker")
+        return {"state": state, "status": STATUS_FAILED, "reason": reason,
+                "frame_id": None, "detected_id": None, "black_square_mm": None,
+                "size": None, "attempts": attempts, "best": None}
+    compact = best[1]
+    return {"state": state, "status": STATUS_OBSERVED, "reason": None,
+            "frame_id": compact["frame_id"], "detected_id": compact["detected_id"],
+            "black_square_mm": compact["black_square_mm"],
+            "size": {k: compact.get(k) for k in
+                     ("black_square_mm", "size_source", "size_uncertainty_mm")},
+            "attempts": attempts, "best": compact}
+
+
+def marker_gate_decision(gate: dict[str, Any], auto: bool,
+                         allow_fallback: bool) -> str:
+    """One place for the live failure policy: continue / retake / abort / fallback."""
+    if gate.get("status") == STATUS_OBSERVED:
+        return "continue"
+    if allow_fallback:
+        return "fallback"
+    if auto:
+        return "abort"
+    return "retake"
+
+
+def preview_marker_line(detection: dict[str, Any]) -> str:
+    """Short, non-fabricated preview text: ID/size/quality or the reason."""
+    selected = detection.get("selected")
+    if selected is None:
+        return f"ARUCO: {detection.get('rejection') or 'no_marker_detected'}"
+    size = selected.get("size") or {}
+    if size.get("status") == "ok":
+        return (f"ARUCO id={selected['detected_id']} "
+                f"{size['black_square_mm']:.1f}mm ok")
+    return f"ARUCO id={selected['detected_id']} size {size.get('reason', 'unknown')}"
+
+
 def _sha(array: np.ndarray | None) -> str | None:
     if array is None:
         return None
@@ -587,7 +807,33 @@ def evaluate_frame(rgb: np.ndarray, depth: np.ndarray, intrinsics: np.ndarray,
     """
     spec.validate()
     cfg = dict(cfg or {})
-    detection = detect_candidates(rgb, spec, cfg)
+    detection = detect_candidates(rgb, spec, cfg, depth=depth, intrinsics=intrinsics)
+    selected = detection["selected"]
+    detected_id = None if selected is None else int(selected["detected_id"])
+    size = None if selected is None else selected.get("size")
+    if (selected is not None and isinstance(size, dict)
+            and size.get("status") == "ok"):
+        # The field sticker may not match the printed PDF size (the historical
+        # zp sticker measured ~33.6 mm against a 16 mm sidecar).  The record uses
+        # the measured size; the nominal spec is only a print-asset value.
+        print_spec = replace(
+            spec, target_id=detected_id,
+            black_square_mm=float(size["black_square_mm"]), sticker_mm=None,
+            size_source="measured_from_depth",
+            size_uncertainty_mm=float(size["size_uncertainty_mm"]))
+    else:
+        print_spec = spec
+    marker = {
+        "marker_type": MARKER_TYPE,
+        "dictionary": spec.dictionary,
+        "target_id": detected_id,
+        "print": print_spec.as_dict(),
+        "size": size,
+        "occlusion": page_area_mm2(print_spec),
+        "detected_ids": detection["detected_ids"],
+        "candidates": detection["candidates"],
+        "detector": detection["detector"],
+    }
     record: dict[str, Any] = {
         "name": al.NAME,
         "definition": al.DEFINITION,
@@ -601,22 +847,12 @@ def evaluate_frame(rgb: np.ndarray, depth: np.ndarray, intrinsics: np.ndarray,
         "coordinate_system": al.OBSERVATION_FRAME_COORDINATES,
         "observation_is_direct_measurement": False,
         "note": ("ArUco 标记中心所指示的喉结体表位置；不是内部甲状软骨的直接测量"),
-        "marker": {
-            "marker_type": MARKER_TYPE,
-            "dictionary": spec.dictionary,
-            "target_id": int(spec.target_id),
-            "print": spec.as_dict(),
-            "occlusion": page_area_mm2(spec),
-            "detected_ids": detection["detected_ids"],
-            "candidates": detection["candidates"],
-            "detector": detection["detector"],
-        },
+        "marker": marker,
         "rgb_sha256": _sha(rgb),
         "depth_sha256": _sha(depth),
         "intrinsics_sha256": _sha(np.asarray(intrinsics, np.float64)),
         "intrinsics": [float(v) for v in intrinsics],
     }
-    selected = detection["selected"]
     if selected is None:
         record.update({"status": STATUS_FAILED, "reason": detection["rejection"],
                        "centre_px": None, "point_observed_m": None,

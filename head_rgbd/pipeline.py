@@ -62,6 +62,12 @@ def _fit_arguments(args, *, steps: int | None = None) -> list[str | Path]:
         str(args.steps if steps is None else steps),
         "--keyframes-per-segment",
         str(args.keyframes_per_segment),
+        *(["--phase-cuts", str(args.phase_cuts)]
+          if getattr(args, "phase_cuts", None) else []),
+        "--correspondence-interval",
+        str(getattr(args, "correspondence_interval", 10)),
+        "--loss-mode",
+        str(getattr(args, "loss_mode", "legacy")),
     ]
 
 
@@ -195,6 +201,16 @@ def reconstruct_locked(
                 motion_only,
                 "--lowerface-weight",
                 str(getattr(args, 'motion_lowerface_weight', .5)),
+                "--steps",
+                str(getattr(args, "motion_steps", 80)),
+                "--correspondence-interval",
+                str(getattr(args, "motion_correspondence_interval", 10)),
+                *(["--expression-start", str(args.motion_expression_start)]
+                  if getattr(args, "motion_expression_start", None) is not None else []),
+                *(["--expression-end", str(args.motion_expression_end)]
+                  if getattr(args, "motion_expression_end", None) is not None else []),
+                "--loss-mode",
+                str(getattr(args, "loss_mode", "legacy")),
             ],
         ),
     )
@@ -462,11 +478,12 @@ def export_delivery(
     exported, and no debug switch exists in the user flow.
 
     After the baseline dense surface is read and before either mesh is written,
-    the optional marker-guided neck prominence stage may displace a small
-    connected patch of front-neck vertices around the valid laryngeal landmark.
-    It is label-localised template shaping, never a measured neck
-    reconstruction; with the stage off, absent or unsafe the baseline geometry is
-    delivered unchanged.
+    the 0.9 public default applies one unified reference-driven neck volume
+    field to the whole neck / head-neck / neck-shoulder transition.  Older
+    marker-guided or two-feature appearance stages remain available through
+    --neck-algorithm but are not the default.  None of them is a measured neck
+    reconstruction; if the stage is off, absent or unsafe the unshaped baseline
+    geometry is delivered unchanged.
     """
     from head_rgbd import __version__
     from head_rgbd import neck_landmark as nl
@@ -565,6 +582,45 @@ def export_delivery(
                     sculpt_plan = continuous_plan
             except Exception as error:  # never block the export on the appearance stage
                 continuous_error = f"{type(error).__name__}: {error}"
+    # 0.9 public default: one unified reference-driven neck VOLUME model.
+    # ``--neck-prominence off`` must disable it too: the volume branch is
+    # reference-driven and would otherwise shape the delivery even though the
+    # mode says off (the mode only gated the observation/marker stages).
+    volume_plan = None
+    volume_error = None
+    if algorithm == "reference_driven_neck_volume":
+        import numpy as _np
+        from head_rgbd import neck_volume as nvol
+        reference_path = (getattr(args, "neck_reference", None)
+                          or (defaults.get("neck_prominence") or {}).get("reference_path"))
+        alpha = float(getattr(args, "neck_alpha", None)
+                      or (defaults.get("neck_prominence") or {}).get("alpha", nvol.DEFAULT_ALPHA))
+        if prominence_config.mode == "off":
+            volume_error = "disabled_by_configuration"
+        elif reference_path is None:
+            volume_error = "reference_path_missing"
+        elif not Path(reference_path).is_file():
+            volume_error = f"reference_missing:{reference_path}"
+        else:
+            try:
+                with _np.load(fit / "parameters.npz", allow_pickle=False) as stored:
+                    dense_v, dense_f = stored["dense_vertices"], stored["dense_faces"]
+            except FileNotFoundError:
+                dense_v = dense_f = None
+            if dense_v is None:
+                volume_error = "parameters_npz_missing"
+            else:
+                try:
+                    volume_plan = nvol.build_states(
+                        states=states, references=references["references"],
+                        dense_vertices=dense_v, dense_faces=dense_f,
+                        reference_path=reference_path, alpha=alpha, detail=True)
+                    if not volume_plan.get("accepted"):
+                        volume_error = "volume_geometry_guard_failed"
+                    else:
+                        sculpt_plan = volume_plan
+                except Exception as error:  # never block the export on the volume stage
+                    volume_error = f"{type(error).__name__}: {error}"
     for state in states:
         reference = references["references"][state]
         if stage not in reference.get("stages", {}):
@@ -713,6 +769,53 @@ def export_delivery(
                     }
                     shaped_vertices = None
                     export_faces = None
+            elif algorithm == "reference_driven_neck_volume":
+                if volume_plan is not None and volume_plan.get("accepted"):
+                    v_item = volume_plan["states"][state]
+                    shaped_vertices = v_item["run"]["vertices"]
+                    export_faces = volume_plan["faces"]
+                    prominence_report = {
+                        "state": state,
+                        "neck_method": nvol.NECK_METHOD_VOLUME,
+                        "geometry_source": nvol.GEOMETRY_SOURCE_VOLUME,
+                        "editing_mode": True,
+                        "subject_observation_matched": False,
+                        "effective_enabled": True,
+                        "position_source": volume_plan["placement"].get("source"),
+                        "position_audit": volume_plan["placement"],
+                        "reference": {"path": str(reference_path),
+                                      "sha256": volume_plan["reference_morphology"]["source_sha256"],
+                                      "used_for_shape_only": True},
+                        "design": volume_plan["design_audit"],
+                        "direction": volume_plan["direction_mode"],
+                        "direction_alpha": volume_plan["alpha"],
+                        "guards": v_item["guards"],
+                        "self_intersections": v_item["intersections"],
+                        "protected_vertices_moved": 0,
+                        "support": volume_plan["audits"][state]["support"],
+                        "base_relative": volume_plan["audits"][state]["base_relative"],
+                        "max_displacement_mm": v_item["max_disp_mm"],
+                        "state_local_adaptation": v_item["state_local_adaptation"],
+                        "status": "applied" if v_item["guards"]["status"] == "passed" else "skipped",
+                        "reason": None,
+                    }
+                    if prominence_report["status"] != "applied":
+                        prominence_report["reason"] = "volume_guard_failed"
+                        prominence_report["safety_fallback"] = "geometry_guard_failed_keep_baseline"
+                        shaped_vertices = None
+                        export_faces = None
+                else:
+                    prominence_report = {
+                        "state": state, "neck_method": "reference_driven_neck_volume",
+                        "geometry_source": "reference_driven_neck_volume",
+                        "editing_mode": prominence_config.mode != "off",
+                        "subject_observation_matched": False,
+                        "effective_enabled": False, "status": "skipped",
+                        "reason": volume_error or "volume_unavailable",
+                        "safety_fallback": "not_applied_keep_baseline",
+                    }
+                    shaped_vertices = None
+                    export_faces = None
             elif algorithm == "observation":
                 prominence_report = _observation_prominence(
                     state=state,
@@ -741,17 +844,22 @@ def export_delivery(
             export_faces = None
             from head_rgbd import neck_appearance as na_mod
             legacy_sculpt = algorithm == "manual_edit"
-            legacy_continuous = algorithm == "continuous_reference"
+            legacy_continuous = algorithm in ("continuous_reference",
+                                              "reference_driven_neck_volume")
             prominence_reports[state] = {
                 "state": state,
                 "status": npn.STATUS_SKIPPED,
                 "reason": "legacy_mesh_storage_shaping_unsupported",
                 "effective_enabled": False,
                 "editing_mode": legacy_sculpt or legacy_continuous,
-                "neck_method": ("two_feature_reference_appearance" if legacy_continuous
-                                else (na_mod.NECK_METHOD_SCULPT if legacy_sculpt else npn.NECK_METHOD)),
-                "geometry_source": ("reference_driven_appearance" if legacy_continuous
-                                    else (na_mod.GEOMETRY_SOURCE_SCULPT if legacy_sculpt else npn.GEOMETRY_SOURCE)),
+                "neck_method": (
+                    "reference_driven_neck_volume" if algorithm == "reference_driven_neck_volume"
+                    else ("two_feature_reference_appearance" if legacy_continuous
+                          else (na_mod.NECK_METHOD_SCULPT if legacy_sculpt else npn.NECK_METHOD))),
+                "geometry_source": (
+                    "reference_driven_neck_volume" if algorithm == "reference_driven_neck_volume"
+                    else ("reference_driven_appearance" if legacy_continuous
+                          else (na_mod.GEOMETRY_SOURCE_SCULPT if legacy_sculpt else npn.GEOMETRY_SOURCE))),
                 "subject_observation_matched": False if (legacy_sculpt or legacy_continuous) else None,
                 "safety_fallback": "legacy_mesh_storage_not_reshaped",
             }
@@ -766,7 +874,20 @@ def export_delivery(
     with np.load(fit / "support_dense.npz", allow_pickle=False) as stored:
         support = {key: stored[key] for key in stored.files}
     label = support["region_label"]
-    if sculpt_plan is not None and len(label) == sculpt_plan["base_vertex_count"]:
+    label_base_count = len(label)
+    volume_applied = bool(volume_plan is not None and volume_plan.get("accepted")
+                          and any(r.get("status") == "applied"
+                                  for r in prominence_reports.values()))
+    if volume_applied:
+        # 0.9 volume stage: one consistent 1->4 split.  Every new midpoint
+        # inherits the support label of its first parent edge vertex.
+        mapped = np.empty(len(volume_plan["states"][states[0]]["run"]["vertices"]),
+                          dtype=label.dtype)
+        mapped[:label_base_count] = label
+        for (i, _j), mid in volume_plan["edge_map"].items():
+            mapped[mid] = label[i]
+        label = mapped
+    elif sculpt_plan is not None and len(label) == sculpt_plan["base_vertex_count"]:
         # map the base-vertex support labels onto the refined topology:
         # a midpoint inherits the label of its first parent
         labels1 = np.concatenate([label, label[[i for i, _ in sculpt_plan["level1_edges"]]]])
@@ -899,6 +1020,14 @@ def export_delivery(
             for state, report in prominence_reports.items()
         },
         "statement": (
+            "0.9 reference-driven neck volume: one unified low-frequency cross-section field "
+            "reshapes the whole neck, both sides, the posterior neck, the neck root and the "
+            "existing shoulder/chest transition from the unshaped baseline; the design is "
+            "reference appearance driven (with template completion), not a measured subject "
+            "neck/shoulder reconstruction, and the target face/jaw identity is preserved"
+            if str(getattr(args, "neck_algorithm", None)
+                   or (defaults.get("neck_prominence") or {}).get("algorithm")) ==
+               "reference_driven_neck_volume" else
             "appearance shaping of the template neck only: the validated laryngeal landmark and the "
             "template neck ridge locate a depth-conditioned, target-height-calibrated two-field "
             "procedural displacement of front-neck template vertices; it is not a measured neck "
@@ -913,7 +1042,8 @@ def export_delivery(
             neck_prominence_payload[key] = None
         neck_prominence_payload["observation_parameter_note"] = (
             "the amplitude/radius fields are observation-only; they are not used by "
-            "continuous_reference or manual_edit and are nulled here for consistency")
+            "reference_driven_neck_volume, continuous_reference or manual_edit and are "
+            "nulled here for consistency")
     write_json_exclusive(output / "neck_prominence.json", neck_prominence_payload)
 
     warnings = _quality_warnings(fit_report, sequence_info, support)
@@ -927,9 +1057,9 @@ def export_delivery(
         "meters_per_unit": MESH_METERS_PER_UNIT,
         "stage": stage,
         "topology_shared": True,
-        "refined_local_topology": bool(sculpt_plan is not None and any(
+        "refined_local_topology": bool((sculpt_plan is not None or volume_applied) and any(
             r.get("status") == "applied" for r in prominence_reports.values())),
-        "base_vertices": int(sculpt_plan["base_vertex_count"]) if sculpt_plan is not None else None,
+        "base_vertices": label_base_count if (sculpt_plan is not None or volume_applied) else None,
         "mesh_files": [filenames[state] for state in states],
         "states": {},
     }

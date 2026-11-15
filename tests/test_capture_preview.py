@@ -14,6 +14,7 @@ from unittest.mock import patch
 
 import cv2
 import numpy as np
+from PIL import Image, ImageDraw
 
 from core.capture import CapturedFrame
 from head_rgbd import capture_session as session
@@ -75,9 +76,11 @@ class FakeGUI:
     def named_window(self, name, _flags):
         self.names.append(name)
 
-    def render(self, rgb, title, guidance, status, *, original_instruction, pressed=False):
+    def render(self, rgb, title, guidance, status, *, original_instruction,
+               pressed=False, marker_line=""):
         self.instruction = original_instruction
         self.status = status
+        self.marker_line = marker_line
         self.statuses.append(status)
         return np.zeros((780, 960, 3), dtype=np.uint8)
 
@@ -192,6 +195,17 @@ class CapturePreviewTests(unittest.TestCase):
                     self.capture, 2, .02, True, False, "pose", preview_window=window,
                 )
         read.assert_called_once()
+        window.close()
+
+    def test_stalled_camera_raises_instead_of_recording_forever(self):
+        window = session._CapturePreview()
+        window.show(self.capture.read_with_metadata(), "pose", "Recording 1/2")
+        with patch.object(self.capture, "read_with_metadata", return_value=None):
+            with self.assertRaisesRegex(session.CaptureStalled, "no camera frame"):
+                session._capture_frames(
+                    self.capture, 2, .02, True, False, "pose",
+                    preview_window=window, frame_timeout_s=1.0,
+                )
         window.close()
 
     def test_auto_records_without_start_key(self):
@@ -314,6 +328,12 @@ class CapturePreviewTests(unittest.TestCase):
             "_detect_face_metadata": {"face_bbox_xywh": None},
         }.items():
             self.stack.enter_context(patch.object(session, name, return_value=value))
+        # These tests exercise window/terminal flow, not ArUco detection; a
+        # synthetic blank frame has no marker and would otherwise retake forever.
+        self.stack.enter_context(patch.object(
+            session.am, "evaluate_frames",
+            return_value={"status": "observed", "reason": None,
+                          "attempts": [], "best": None, "attempt": 0}))
 
     def test_preview_session_needs_no_terminal_confirmation(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -360,6 +380,21 @@ class CapturePreviewTests(unittest.TestCase):
             self.assertEqual(ready.call_count, 4)
             self.assertEqual(self.gui.names, [])
 
+    def test_stalled_session_is_aborted_with_a_reason(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self.setup_session(root)
+            with patch.object(self.capture, "read_with_metadata", return_value=None):
+                with self.assertRaisesRegex(session.CaptureStalled, "no camera frame"):
+                    session.capture_session(
+                        runtime=root, session_name="stall", frames_per_view=2,
+                        warmup_s=0, countdown_s=0,
+                    )
+            partial = next((root / "captures").glob("*/session.partial.json"))
+            manifest = json.loads(partial.read_text(encoding="utf-8"))
+            self.assertEqual(manifest["status"], "aborted")
+            self.assertIn("CaptureStalled", manifest["abort_reason"])
+
 
 class CaptureLauncherTests(unittest.TestCase):
     @unittest.skipUnless(os.name == "nt" and shutil.which("pwsh.exe"), "Windows PowerShell launcher")
@@ -394,12 +429,60 @@ class CapturePanelTests(unittest.TestCase):
         recording = panel.render(dark, title, guidance, "Recording 1/5", original_instruction=instruction)
         self.assertLess(int(recording[710, 632, 1]), 100)
 
+    def test_retry_state_is_ready_and_shows_the_marker_reason(self):
+        panel = session.CapturePanel()
+        instruction = session.VIEW_INSTRUCTIONS[("open", "front")]
+        title, guidance = session.PREVIEW_INSTRUCTIONS[instruction]
+        dark = np.zeros((180, 320, 3), dtype=np.uint8)
+        retry = panel.render(
+            dark, title, guidance,
+            "RETRY: open front: size_insufficient_corners — 标记角点深度不足",
+            original_instruction=instruction,
+            marker_line="ARUCO: size_insufficient_corners")
+        self.assertEqual(retry.shape, (780, 960, 3))
+        self.assertGreater(int(retry[710, 632, 1]), 150)   # ready/retry button
+        self.assertIn("RETRY:", panel._key[2])
+        recording = panel.render(dark, title, guidance, "Recording 1/5",
+                                 original_instruction=instruction,
+                                 marker_line="ARUCO: size_insufficient_corners")
+        self.assertFalse(np.array_equal(retry, recording))
+
     def test_english_fallback_and_unusual_aspect_ratio_render(self):
         panel = session.CapturePanel()
         panel.chinese = False
         shown = panel.render(np.zeros((100, 10, 3), dtype=np.uint8), "title", "guidance",
                              "Starting in 2...", original_instruction="Look straight at the camera.")
         self.assertEqual(shown.shape, (780, 960, 3))
+
+    def test_long_retry_reason_wraps_inside_the_text_column(self):
+        panel = session.CapturePanel()
+        draw = ImageDraw.Draw(Image.new("RGB", (16, 16)))
+        reason = "原因：open front: size_insufficient_corners — 标记角点深度不足；调整距离/角度，避开深度空洞。"
+        lines = panel._wrap(draw, reason * 2)
+        self.assertEqual(len(lines), 2)
+        self.assertTrue(lines[-1].endswith("…"))
+        for line in lines:
+            self.assertLessEqual(draw.textlength(line, font=panel.fonts[19]),
+                                 panel.TEXT_WIDTH + 0.5)
+
+    def test_marker_line_is_clipped_to_its_top_bar_slot(self):
+        panel = session.CapturePanel()
+        draw = ImageDraw.Draw(Image.new("RGB", (16, 16)))
+        fitted = panel._fit_marker(draw, "ARUCO " + "size_insufficient_corners " * 8)
+        self.assertTrue(fitted.endswith("…"))
+        self.assertLessEqual(draw.textlength(fitted, font=panel.fonts[17]),
+                             panel.MARKER_WIDTH + 0.5)
+
+    def test_marker_line_never_covers_the_camera_image(self):
+        panel = session.CapturePanel()
+        frame = np.zeros((180, 320, 3), dtype=np.uint8)
+        args = (frame, "title", "guidance", "SPACE: start")
+        kwargs = {"original_instruction": "Look straight at the camera."}
+        without = panel.render(*args, **kwargs)
+        with_marker = panel.render(*args, marker_line="ARUCO id=0 33.4mm ok", **kwargs)
+        rows = np.nonzero(np.any(without != with_marker, axis=2))[0]
+        self.assertTrue(rows.size)
+        self.assertLess(int(rows.max()), session.CapturePanel.CAMERA[1])
 
 
 if __name__ == "__main__":

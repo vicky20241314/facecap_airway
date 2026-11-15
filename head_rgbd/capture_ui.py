@@ -35,17 +35,68 @@ class CapturePanel:
     SIZE = (960, 780)
     BUTTON = (620, 668, 932, 756)
     CAMERA = (0, 104, 960, 644)
+    TEXT_WIDTH = 578
+    HEADLINE_Y = 655
+    DETAIL_Y = 691
+    CANCEL_Y = 750
+    MARKER_XY = (400, 24)
+    MARKER_WIDTH = 380
 
     def __init__(self):
         self.fonts, self.chinese = _fonts()
         self._key = None
         self._template = None
 
-    def _controls(self, title, guidance, status, original_instruction, pressed):
-        ready = status.startswith("SPACE:")
-        countdown = re.match(r"Starting in (\d+)", status)
-        recording = re.match(r"Recording (\d+)/(\d+)", status)
-        if ready:
+    def _wrap(self, draw, text, max_lines=2):
+        font = self.fonts[19]
+        tokens = re.findall(r"[A-Za-z0-9_.:;,%+\-/|]+|\s+|.", text)
+        lines: list[str] = []
+        current = ""
+        for token in tokens:
+            candidate = current + token
+            if current and draw.textlength(candidate, font=font) > self.TEXT_WIDTH:
+                lines.append(current.rstrip())
+                current = token.lstrip()
+            else:
+                current = candidate
+        if current.strip():
+            lines.append(current.rstrip())
+        if len(lines) > max_lines:
+            lines = lines[:max_lines]
+            last = lines[-1]
+            while last and draw.textlength(last + "…", font=font) > self.TEXT_WIDTH:
+                last = last[:-1]
+            lines[-1] = last + "…"
+        return lines
+
+    def _fit_marker(self, draw, text):
+        font = self.fonts[17]
+        if draw.textlength(text, font=font) <= self.MARKER_WIDTH:
+            return text
+        while text and draw.textlength(text + "…", font=font) > self.MARKER_WIDTH:
+            text = text[:-1]
+        return text + "…"
+
+    def _controls(self, title, guidance, status, original_instruction, pressed,
+                  marker_line=""):
+        retry = "RETRY:" in status
+        ready = status.startswith("SPACE:") or retry
+        countdown = re.search(r"Starting in (\d+)", status)
+        recording = re.search(r"Recording (\d+)/(\d+)", status)
+        if retry:
+            reason = status.split("RETRY:", 1)[1].strip()[:120]
+            # The pose is already named in the title, so the retry text keeps
+            # only the machine reason and its hint.
+            reason = re.sub(r"^(?:closed|open) front:\s*", "", reason)
+            reason_en = reason.split(" — ", 1)[0]
+            badge = "需要重拍" if self.chinese else "RETRY"
+            headline = "标记无效：请调整后重拍" if self.chinese else "Marker invalid: adjust and retry"
+            detail = (f"原因：{reason}。按空格或点击“重新采集”重拍。"
+                      if self.chinese else
+                      f"Reason: {reason_en}. Press SPACE or click Retry.")
+            label = "重新采集" if self.chinese else "Retry"
+            accent = (255, 178, 92)
+        elif ready:
             badge = "准备采集" if self.chinese else "READY"
             headline = "准备就绪：点击按钮或按空格" if self.chinese else "Click Start capture or press SPACE"
             detail = "调整好姿态后点击，立即开始采集，无需倒计时。" if self.chinese else "Get into position; click to capture immediately."
@@ -75,10 +126,18 @@ class CapturePanel:
         draw.text((28, 16), title, font=self.fonts[30], fill=(245, 248, 255))
         draw.text((790, 24), badge, font=self.fonts[19], fill=accent)
         draw.text((28, 66), guidance, font=self.fonts[19], fill=(211, 224, 242))
-        draw.text((28, 661), headline, font=self.fonts[24], fill=accent)
-        draw.text((28, 701), detail, font=self.fonts[19], fill=(220, 230, 244))
+        if marker_line:
+            marker_ok = ("ARUCO:" not in marker_line and "ok" in marker_line)
+            draw.text(self.MARKER_XY, self._fit_marker(draw, marker_line),
+                      font=self.fonts[17],
+                      fill=(130, 244, 191) if marker_ok else (255, 132, 125))
+        draw.text((28, self.HEADLINE_Y), headline, font=self.fonts[24], fill=accent)
+        y = self.DETAIL_Y
+        for line in self._wrap(draw, detail):
+            draw.text((28, y), line, font=self.fonts[19], fill=(220, 230, 244))
+            y += 28
         cancel = "ESC 或关闭窗口可取消采集" if self.chinese else "ESC or close window to cancel"
-        draw.text((28, 742), cancel, font=self.fonts[17], fill=(174, 194, 220))
+        draw.text((28, self.CANCEL_Y), cancel, font=self.fonts[17], fill=(174, 194, 220))
         button_fill = ((24, 165, 98) if pressed else (48, 213, 136)) if ready else (48, 63, 83)
         draw.rounded_rectangle(self.BUTTON, radius=16, fill=button_fill,
                                outline=(130, 244, 191) if ready else (80, 99, 124), width=2)
@@ -88,8 +147,9 @@ class CapturePanel:
                   anchor="mm")
         return cv2.cvtColor(np.asarray(panel), cv2.COLOR_RGB2BGR)
 
-    def render(self, rgb, title, guidance, status, *, original_instruction, pressed=False):
-        key = (title, guidance, status, original_instruction, pressed)
+    def render(self, rgb, title, guidance, status, *, original_instruction,
+               pressed=False, marker_line=""):
+        key = (title, guidance, status, original_instruction, pressed, marker_line)
         if key != self._key:
             self._template = self._controls(*key)
             self._key = key

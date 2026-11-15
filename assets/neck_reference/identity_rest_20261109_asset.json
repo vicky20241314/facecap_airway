@@ -7,13 +7,22 @@
  "axes": "Y up, +Z anterior",
  "units": "m",
  "head": {
+  "H_head_mm": 225.679,
+  "W_head_mm": 176.847,
+  "D_head_mm": 203.641,
+  "crown_y_mm": 141.198,
+  "chin_y_mm": -84.481,
+  "nose_tip_y_mm": 1.519,
+  "region": "crown to menton; temporal band 0.35-0.85 H; neck, shoulders and bottom cut excluded",
+  "axes": "Y up, +Z anterior",
+  "method": "0.9 corrected menton = submental break of the midline anterior profile"
+ },
+ "head_legacy_080_bug": {
   "H_head_mm": 139.68,
   "W_head_mm": 158.61,
   "D_head_mm": 186.59,
-  "crown_y_mm": 141.2,
   "chin_y_mm": 1.52,
-  "region": "crown to chin/menton; temporal band 0.35-0.85 H; neck excluded",
-  "axes": "Y up, +Z anterior"
+  "note": "0.8 candidate mis-detected the NOSE TIP as the chin. These values and the derived 1.6368 longitudinal scale are withdrawn and must not be used by the public path."
  },
  "features": {
   "A": {
@@ -101,5 +110,5 @@
    "features": 1
   }
  },
- "note": "project-owned traceable copy of the reference; the public 0.7.0 default uses this copy"
+ "note": "project-owned traceable copy of the reference; the public 0.9.0 reference_driven_neck_volume default uses this copy. The old 0.8 head measurements are retained only under head_legacy_080_bug for traceability."
 }

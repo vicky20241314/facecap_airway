@@ -20,6 +20,11 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+from scipy.spatial import cKDTree
+
+from head_rgbd import neck_anatomy as na
+from head_rgbd import neck_direct as nd
+from head_rgbd import neck_prominence as npn
 
 NAME = "laryngeal_prominence"
 DEFINITION = "人工指定的喉结体表位置"
@@ -435,6 +440,82 @@ def apply_transform(point_m: list[float], transform: dict[str, Any]) -> list[flo
 # ---------------------------------------------------------------------------
 # Landmark sidecar file (neck_landmarks.json)
 # ---------------------------------------------------------------------------
+
+def validate_marker_position(point_reference_m: list[float], *, state: str,
+                             V: np.ndarray, F: np.ndarray, ax: dict,
+                             curve, h_chin: float,
+                             p: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Subject-space front-neck position gate for the marker centre.
+
+    The marker is only allowed to drive C when it lies on the subject's anterior
+    neck: ``0.35 <= t <= t_gate + 0.025``, ``|theta| <= 20 deg``, the nearest
+    surface vertex still faces up/outward (the same normal threshold used by the
+    larynx prior), and the point is not far from the subject surface.  A point on
+    the jaw underside, clavicle or shoulder fails with a named reason; it is
+    never clamped into range.
+    """
+    p = dict(p or {})
+    result: dict[str, Any] = {
+        "status": STATUS_FAILED, "reason": None, "state": state,
+        "point_reference_m": [float(v) for v in point_reference_m],
+        "t_marker": None, "theta_marker_deg": None, "t_gate": None,
+        "t_center_used": None, "theta_used_deg": 0.0,
+        "source": SOURCE_ARUCO,
+        "t_range": [0.35, None], "theta_limit_deg": 20.0,
+        "checks": {},
+    }
+    note = point_reference_m
+    if not isinstance(note, (list, tuple)) or len(note) != 3 or not np.isfinite(note).all():
+        result["reason"] = "marker_point_not_finite"
+        return result
+    gate, profile = na.anterior_gate_top(V, F, ax, curve, h_chin, p)
+    t_hi = float(gate) + 0.025
+    point_mm = np.asarray(note, dtype=np.float64) * 1000.0
+    h, th, r, t = nd.axial_mm(point_mm[None, :], ax, curve, h_chin)
+    t = float(t[0])
+    theta_deg = float(np.degrees(th[0]))
+    t = float(t)
+    # nearest surface vertex and its outward normal
+    Vmm = np.asarray(V, dtype=np.float64) * 1000.0
+    tree = cKDTree(Vmm)
+    distance_mm, index = tree.query(point_mm, k=1)
+    normals = npn.vertex_normals(V, F)
+    dn = float(normals[int(index)] @ np.asarray(ax["axis"], float))
+    max_distance = float(p.get("marker_max_surface_distance_mm", 30.0))
+    gate_dn = float(p.get("larynx_prior_gate_dn", -0.30))
+    checks = {
+        "t_in_range": bool(0.35 <= t <= t_hi),
+        "theta_in_range": bool(abs(theta_deg) <= 20.0),
+        "normal_gate": bool(dn > gate_dn),
+        "near_surface": bool(float(distance_mm) <= max_distance),
+    }
+    result.update({
+        "t_marker": t, "theta_marker_deg": theta_deg, "t_gate": float(gate),
+        "t_center_used": t, "theta_used_deg": 0.0,
+        "t_range": [0.35, t_hi],
+        "nearest_surface_distance_mm": float(distance_mm),
+        "nearest_vertex_index": int(index),
+        "nearest_normal_dn": dn,
+        "gate_dn_threshold": gate_dn,
+        "checks": checks,
+        "gate_profile": profile,
+    })
+    if not checks["t_in_range"]:
+        result["reason"] = ("marker_t_below_0_35" if t < 0.35
+                            else "marker_t_above_gate")
+        return result
+    if not checks["theta_in_range"]:
+        result["reason"] = "marker_theta_out_of_range"
+        return result
+    if not checks["normal_gate"]:
+        result["reason"] = "marker_normal_gate_failed"
+        return result
+    if not checks["near_surface"]:
+        result["reason"] = "marker_far_from_subject_surface"
+        return result
+    result["status"] = STATUS_OBSERVED
+    return result
+
 
 def _validate_record(record: Any, state: str) -> tuple[dict[str, Any] | None, str | None]:
     if not isinstance(record, dict):

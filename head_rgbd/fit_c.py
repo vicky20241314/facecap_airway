@@ -38,6 +38,14 @@ def main():
     p.add_argument('--device',choices=['cpu','cuda'],default='cuda')
     p.add_argument('--front-only',action='store_true');p.add_argument('--points',type=int,default=1200)
     p.add_argument('--steps',type=int,default=240);p.add_argument('--keyframes-per-segment',type=int,default=3)
+    p.add_argument('--phase-cuts',type=str,default=None,
+        help='comma-separated 4 strictly increasing interior phase fractions; '
+             'default 0.167,0.458,0.625,0.833 (240 steps: 40/110/150/200)')
+    p.add_argument('--correspondence-interval',type=int,default=10,
+        help='steps between surface correspondence refreshes (phase start always refreshes)')
+    p.add_argument('--loss-mode',choices=('legacy','batch'),default='legacy',
+        help='legacy per-frame Python loss loop, or frame-dimension batch loss '
+             'with identical weights/denominators/beta')
     p.add_argument('--expression-components',type=int,default=30)
     p.add_argument('--front-anchor',type=Path,help='conservative side-detail mode; preserve this real front-only identity/motion')
     p.add_argument('--shape-fusion',choices=['guarded','joint'],default='guarded',
@@ -58,6 +66,14 @@ def main():
         p.error('joint shape fusion needs a front-only anchor as its initialization')
     if a.side_depth_weight<0 or a.joint_shape_prior<0:p.error('joint weights must not be negative')
     if a.steps<40 or a.points<100 or not 10<=a.expression_components<=50:p.error('invalid fitting budget/components')
+    if a.correspondence_interval<1:p.error('--correspondence-interval must be >= 1')
+    if a.phase_cuts:
+        try:fractions=[float(x) for x in a.phase_cuts.split(',')]
+        except ValueError:p.error('--phase-cuts must be comma-separated numbers')
+        if len(fractions)!=4 or any(not 0.<x<1. for x in fractions) or any(
+            y<=x for x,y in zip(fractions,fractions[1:])):
+            p.error('--phase-cuts needs 4 strictly increasing fractions inside (0,1)')
+    else:fractions=[.167,.458,.625,.833]
     paths=configure_environment(a.runtime);all_assets=asset_paths(paths.runtime)
     torch.set_num_threads(4);torch.manual_seed(1234);rng=np.random.default_rng(1234)
     start=time.perf_counter();info=json.loads(a.sequence.read_text(encoding='utf-8'))
@@ -146,6 +162,18 @@ def main():
         rows[i]['landmark_depth_outlier_rejected']=bad
         points.append(sample_depth(d,a.points,rng)[0]);identity_points.append(sample_depth(d,a.points,rng,True)[0])
     edges=[(i-1,i) for i in good if i-1 in good and temporal_edge_allowed(rows[i-1],rows[i])]
+    # ---- P2 frame-dimension batch loss tensors (legacy loop untouched) ----
+    from head_rgbd.loss_batch import pack_correspond,masked_mean,smooth_l1
+    masks_b=torch.stack(masks);masks2_b=torch.stack(masks2)
+    target3_b=torch.stack(target3);target2_b=torch.stack(target2)
+    front_b=torch.tensor([rows[i]['view']=='front' for i in range(n)],dtype=torch.bool,device=dev)
+    closed_b=torch.tensor([rows[i]['state']=='closed' for i in range(n)],dtype=torch.bool,device=dev)
+    vis_b=torch.ones((n,68),dtype=torch.bool,device=dev)
+    col17=torch.arange(68,device=dev)>=17;col48=torch.arange(68,device=dev)>=48
+    col60=torch.arange(68,device=dev)>=60
+    intr_b=torch.as_tensor(np.asarray([data[i]['intrinsics'] for i in range(n)]),
+        device=dev,dtype=torch.float32)
+    corr_pack=None
     def forward():
         R=batch_rodrigues(rotation)@base
         v,l=flame(shape_params=shape.expand(n,-1),expression_params=expr,
@@ -153,11 +181,59 @@ def main():
         return v,torch.einsum('bij,bvj->bvi',R,v)+trans[:,None],torch.einsum('bij,bkj->bki',R,l)+trans[:,None],R
     def robust(x):
         return torch.nn.functional.smooth_l1_loss(x,torch.zeros_like(x),beta=.3)
+    def frame_batch_loss():
+        """Frame-dimension equivalent of the legacy per-frame loss loop.
+
+        Same masks, frame weights, term weights, normalisation and beta; only
+        the summation order differs.  Per-frame Python ``.any()`` syncs are gone.
+        """
+        total=v.sum()*0
+        fw=torch.zeros(n,device=dev)
+        for i in active:fw[i]=view_weights[i]/denominator
+        exclude48=identity_phase|(~front_b)
+        valid=masks_b&vis_b&col17[None,:]
+        valid[:,48:]=valid[:,48:]&(~exclude48)[:,None]
+        stable=valid&(~col60)[None,:];inner=valid&col60[None,:]
+        lw=.2 if anchor is not None and stage>0 else 1.
+        diff=(l-target3_b)/.01
+        el=smooth_l1(diff,.3)
+        total=total+(fw*lw*masked_mean(el,stable)).sum()
+        total=total+(fw*.25*masked_mean(el,inner)).sum()
+        z=(-l[:,:,2]).clamp(min=.05)
+        uv=torch.stack((intr_b[:,0:1]*l[:,:,0]/z+intr_b[:,2:3],
+                        -intr_b[:,1:2]*l[:,:,1]/z+intr_b[:,3:4]),2)
+        el2=smooth_l1((uv-target2_b)/10,.3)
+        valid2=masks2_b&vis_b&col17[None,:]
+        valid2[:,48:]=valid2[:,48:]&(~exclude48)[:,None]
+        total=total+(fw*lw*.15*masked_mean(el2,valid2)).sum()
+        if not identity_phase:
+            mouth=masks2_b&front_b[:,None]&col48[None,:]
+            total=total+(fw*.35*masked_mean(el2,mouth)).sum()
+            gaps=torch.linalg.norm(l[:,[61,62,63]]-l[:,[67,66,65]],dim=2)
+            gterm=(torch.relu(gaps-.002)/.003).square().mean(1)
+            total=total+(fw*.15*gterm*closed_b).sum()
+        if stage>0 and corr_pack is not None:
+            tri,bc,normal,target,cmask=corr_pack
+            idx=torch.arange(n,device=dev)[:,None,None]
+            surf=(v[idx,tri]*bc[:,:,:,None]).sum(2)
+            res=((surf-target)*normal).sum(2)/.01
+            depth=torch.where(front_b,torch.ones_like(fw),
+                              torch.full_like(fw,float(a.side_depth_weight)))
+            total=total+(fw*1.4*depth*masked_mean(smooth_l1(res,.3),cmask)).sum()
+        return total
     # Total budget equals B by default. Each stage has distinct active variables.
-    cuts=np.rint(np.array([0,.167,.458,.625,.833,1])*a.steps).astype(int)
+    cuts=np.rint(np.array([0,*fractions,1])*a.steps).astype(int)
+    if len(np.unique(cuts))!=6 or cuts[0]!=0 or cuts[-1]!=a.steps:
+        p.error('phase cuts collapse at this --steps; increase the budget or change --phase-cuts')
+    interval=int(a.correspondence_interval);loss_mode=a.loss_mode
     phase_names=['motion_initial','identity_large','expression_reestimate','identity_surface','motion_final']
     correspond={};history=[];correspondence_log=[];landmark_visibility={}
+    loop_timing=dict(steps=int(a.steps),correspondence_steps=0,correspondence_s=0.,step_s=0.,
+                     forward_s=0.,loss_s=0.,backward_s=0.,opt_s=0.)
+    def sync():
+        if dev.type=='cuda':torch.cuda.synchronize()
     for step in range(a.steps):
+        sync();loop_started=time.perf_counter();correspondence_s=0.
         stage=min(np.searchsorted(cuts[1:],step,side='right'),4);identity_phase=stage in (1,3)
         phase=phase_names[stage];active=identity_ids if identity_phase else good
         if anchor is not None:
@@ -174,6 +250,7 @@ def main():
             active=[i for i in active if rows[i]['view']=='front']
         if not active:raise ValueError('no unanchored real frames')
         opt.zero_grad();raw,v,l,R=forward();loss=v.sum()*0
+        sync();forward_end=time.perf_counter()
         if joint and identity_phase:
             # One vote per closed view on the shared identity. The side multiplier
             # scales only the depth term, so landmarks stay comparable across views.
@@ -182,7 +259,12 @@ def main():
             view_weights={i:3. if identity_phase and rows[i]['view']=='front' else 1. for i in active}
         denominator=sum(view_weights.values())
         # First phase uses landmarks. Later phases use true triangle surfaces.
-        if stage>0 and (step==cuts[stage] or (step-cuts[stage])%10==0):
+        # identity_large is still descending in the ledger; keep its historic
+        # refresh cadence. The plateau phases (expression/surface/final) use the
+        # wider interval. Phase starts always refresh.
+        stage_interval = 10 if stage == 1 else interval
+        if stage>0 and (step==cuts[stage] or (step-cuts[stage])%stage_interval==0):
+            sync();correspondence_started=time.perf_counter()
             correspond={}
             with torch.no_grad():
                 for i in active:
@@ -194,13 +276,18 @@ def main():
                         discrepancy=np.linalg.norm(l[i].cpu().numpy()-np.nan_to_num(data[i]['xyz']),axis=1)
                         reliable=visible_lm&(discrepancy<.012)
                         landmark_visibility[i]=torch.as_tensor(reliable,device=dev)
+                        vis_b[i]=landmark_visibility[i]
                         rows[i]['motion_landmark_visibility_or_outlier_rejected']=np.flatnonzero(~reliable).tolist()
                         stats['visible_depth_consistent_landmarks']=int(reliable[17:48].sum())
                     if corr is not None and stats['accepted']>=30:
                         correspond[i]=(ft[torch.as_tensor(corr['face'],device=dev)],T(corr['bary']),T(corr['normal']),T(corr['target']))
                     correspondence_log.append(dict(step=step,phase=phase,frame_id=rows[i]['id'],**stats))
             print(json.dumps(dict(step=step,phase=phase,correspondence_frames=len(correspond))),flush=True)
-        for i in active:
+            if loss_mode=='batch':corr_pack=pack_correspond(correspond,n,dev)
+            sync();correspondence_s=time.perf_counter()-correspondence_started
+            loop_timing['correspondence_s']+=correspondence_s
+            loop_timing['correspondence_steps']+=1
+        for i in (active if loss_mode=='legacy' else []):
             frame_weight=view_weights[i]/denominator
             valid=masks[i].clone();valid[:17]=False
             if i in landmark_visibility:valid &= landmark_visibility[i]
@@ -231,6 +318,8 @@ def main():
                 residual=((surface-target)*normal).sum(1)
                 depth_weight=1. if rows[i]['view']=='front' else a.side_depth_weight
                 loss+=frame_weight*1.4*depth_weight*robust(residual/.01)
+        if loss_mode=='batch':
+            loss+=frame_batch_loss()
         # Preserve B's per-coefficient expression prior when adding components.
         loss+=.002*shape.square().mean()+.002*expr.square().sum()/(n*10)+.01*jaw.square().mean()
         if anchor_shape is not None:
@@ -242,7 +331,9 @@ def main():
                 dt=rows[j]['timestamp_s']-rows[i]['timestamp_s'];factor=(.033/max(dt,.01))**2
                 loss+=factor*(.005*(expr[j]-expr[i]).square().sum()/10+.02*(jaw[j]-jaw[i]).square().mean()+.01*(rotation[j]-rotation[i]).square().mean())/max(len(edges),1)
         if not torch.isfinite(loss):raise RuntimeError('nonfinite objective')
+        sync();loss_end=time.perf_counter()
         loss.backward()
+        sync();backward_end=time.perf_counter()
         if identity_phase:expr.grad=None;jaw.grad=None
         if not identity_phase or (anchor is not None and not joint):shape.grad=None
         torch.nn.utils.clip_grad_norm_([shape,expr,jaw,rotation,trans],10.)
@@ -256,7 +347,15 @@ def main():
             rotation[inactive]=frozen_r;trans[inactive]=frozen_t
             expr[frozen_ids]=frozen_e;jaw[frozen_ids]=frozen_j
         with torch.no_grad():jaw.clamp_(-.7,.7);shape.clamp_(-4,4);expr.clamp_(-4,4)
-        if step%20==0 or step==a.steps-1:
+        sync();opt_end=time.perf_counter()
+        loop_timing['forward_s']+=forward_end-loop_started
+        loop_timing['loss_s']+=loss_end-forward_end-correspondence_s
+        loop_timing['backward_s']+=backward_end-loss_end
+        loop_timing['opt_s']+=opt_end-backward_end
+        loop_timing['step_s']+=opt_end-loop_started-correspondence_s
+        # Record-only: per-20-step samples plus the last step of every phase, so
+        # a phase-final objective can be compared without changing the solve.
+        if step%20==0 or step==cuts[stage+1]-1:
             record=dict(step=step,phase=phase,objective=float(loss.detach()));history.append(record);print(record,flush=True)
     with torch.no_grad():
         raw,v,l,R=forward();fi,bc=landmark_embedding(flame,raw,jaw,R)
@@ -367,6 +466,8 @@ def main():
         joint_shape_delta_from_anchor=float(np.abs(shape.detach().cpu().numpy()-anchor['shape']).max()) if joint else None,
         local_field_max_mm=float(np.abs(deviation).max()*1000),
         elapsed_s=time.perf_counter()-start,fitting_s=fit_end-start,expression_components=ne,
+        timing=loop_timing,
+        timing_step_scope='loop wall time split: correspondence_s = CPU ray_surface refresh block; step_s = forward_s + loss_s + backward_s + opt_s; torch.cuda.synchronize() at each boundary; exports excluded',
         identity_front_observation_weight=3.,identity_other_view_weight=1.,expression_prior_per_coefficient=.002/(n*10),
         cuda_peak_allocated_mib=torch.cuda.max_memory_allocated()/2**20 if a.device=='cuda' else 0,
         cuda_peak_reserved_mib=torch.cuda.max_memory_reserved()/2**20 if a.device=='cuda' else 0,

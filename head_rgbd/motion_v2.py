@@ -49,9 +49,16 @@ def _frame_loss_weights(rows):
     return np.full(len(rows),1./max(len(rows),1),dtype=np.float64)
 
 
-def correct(sequence,initial,output,runtime,device='cuda',steps=80,identity_field=None,lowerface_weight=.5):
+def correct(sequence,initial,output,runtime,device='cuda',steps=80,identity_field=None,lowerface_weight=.5,
+            correspondence_interval=10,expression_start=None,expression_end=None,loss_mode='legacy'):
     if not np.isfinite(lowerface_weight) or lowerface_weight<0:
         raise ValueError('lowerface weight must be finite and nonnegative')
+    expr_start=steps//2 if expression_start is None else int(expression_start)
+    expr_end=3*steps//4 if expression_end is None else int(expression_end)
+    if not 0<=expr_start<expr_end<=steps:
+        raise ValueError('expression phase window must satisfy 0 <= start < end <= steps')
+    if int(correspondence_interval)<1:raise ValueError('correspondence interval must be >= 1')
+    if loss_mode not in ('legacy','batch'):raise ValueError('unsupported loss mode')
     configure_environment(runtime);start=time.perf_counter();torch.set_num_threads(4)
     output.mkdir(parents=True,exist_ok=False)
     report=json.loads((initial/'report.json').read_text(encoding='utf-8'))
@@ -120,14 +127,63 @@ def correct(sequence,initial,output,runtime,device='cuda',steps=80,identity_fiel
         if covered.sum()>=30:
             lower_required[i]=covered
             lower_old_scores[i]=float(np.mean(residual[covered]**2))
+    # ---- P2 frame-dimension batch loss tensors (legacy loop untouched) ----
+    from head_rgbd.loss_batch import pack_correspond,masked_mean,smooth_l1
+    fw_t=torch.as_tensor(frame_loss_weights,device=device,dtype=torch.float32)
+    lm_valid_np=[]
+    for d in data:
+        vld=d['valid'].copy();vld[:17]=False;vld[48:]=False;lm_valid_np.append(vld)
+    lm_valid_t=torch.as_tensor(np.stack(lm_valid_np),device=device)
+    xyz_t=torch.nan_to_num(torch.stack([T(d['xyz']) for d in data]))
+    uv_t=torch.nan_to_num(torch.stack([T(d['uv']) for d in data]))
+    cols=torch.arange(68,device=device)
+    finite_uv_t=torch.as_tensor(np.stack([np.isfinite(d['uv']).all(1) for d in data]),
+                                device=device)&(cols>=48)[None,:]
+    closed_t=torch.tensor([row['state']=='closed' for row in rows],device=device)
+    intr_t=torch.as_tensor(np.asarray([d['intrinsics'] for d in data]),
+                           device=device,dtype=torch.float32)
+    corr_pack=None;lower_pack=None
     opt=torch.optim.Adam([{'params':[dr],'lr':.0006},{'params':[dt],'lr':.00008},
                           {'params':[de],'lr':.006},{'params':[dj],'lr':.0006}])
     temporal=[(i-1,i) for i in range(1,n) if temporal_edge_allowed(rows[i-1],rows[i])]
     history=[];correspond={};lower_correspond={}
+    loop_timing=dict(steps=int(steps),correspondence_steps=0,correspondence_s=0.,step_s=0.,
+                     forward_s=0.,loss_s=0.,backward_s=0.,opt_s=0.)
+    def sync():
+        if device=='cuda':torch.cuda.synchronize()
+    def batch_loss():
+        """Frame-dimension equivalent of the legacy per-frame motion loss."""
+        total=v.sum()*0
+        if corr_pack is not None:
+            tri,bc,normal,target,cmask=corr_pack
+            idx=torch.arange(n,device=device)[:,None,None]
+            surf=(fit_v[idx,tri]*bc[:,:,:,None]).sum(2)
+            res=((surf-target)*normal).sum(2)/.002
+            total=total+(fw_t*masked_mean(smooth_l1(res,1.),cmask)).sum()
+            present=cmask.any(1)
+            total=total+(fw_t*.12*masked_mean(smooth_l1((l-xyz_t)/.003,1.),lm_valid_t)*present).sum()
+            if expression_phase:
+                z=(-l[:,:,2]).clamp(min=.05)
+                proj=torch.stack((intr_t[:,0:1]*l[:,:,0]/z+intr_t[:,2:3],
+                                  -intr_t[:,1:2]*l[:,:,1]/z+intr_t[:,3:4]),2)
+                total=total+(fw_t*.08*masked_mean(smooth_l1((proj-uv_t)/3,1.),finite_uv_t)*present).sum()
+                gaps=torch.linalg.norm(l[:,[61,62,63]]-l[:,[67,66,65]],dim=2)
+                gt=(torch.relu(gaps-.002)/.003).square().mean(1)
+                total=total+(fw_t*.1*gt*closed_t*present).sum()
+        if expression_phase and lower_pack is not None:
+            tri,bc,normal,target,cmask=lower_pack
+            idx=torch.arange(n,device=device)[:,None,None]
+            surf=(fit_v[idx,tri]*bc[:,:,:,None]).sum(2)
+            res=((surf-target)*normal).sum(2)/.002
+            total=total+(fw_t*lowerface_weight*masked_mean(smooth_l1(res,1.),cmask)).sum()
+        return total
     for step in range(steps):
-        expression_phase=steps//2<=step<3*steps//4
+        sync();loop_started=time.perf_counter();correspondence_s=0.
+        expression_phase=expr_start<=step<expr_end
         opt.zero_grad();raw,v,l,R,fit_v=forward();loss=v.sum()*0
-        if step%10==0 or step in (steps//2,3*steps//4):
+        sync();forward_end=time.perf_counter()
+        if step%int(correspondence_interval)==0 or step in (expr_start,expr_end):
+            sync();correspondence_started=time.perf_counter()
             correspond={}
             for i in range(n):
                 if len(points[i])<80:continue
@@ -140,7 +196,13 @@ def correct(sequence,initial,output,runtime,device='cuda',steps=80,identity_fiel
                     c,_=ray_surface(fit_v[i].detach().cpu().numpy(),faces,lower_points[i],.008,.005)
                     if c is not None:
                         lower_correspond[i]=(ft[torch.as_tensor(c['face'],device=device)],T(c['bary']),T(c['normal']),T(c['target']))
-        for i,(tri,bc,normal,target) in correspond.items():
+            sync();correspondence_s=time.perf_counter()-correspondence_started
+            if loss_mode=='batch':
+                corr_pack=pack_correspond(correspond,n,device)
+                lower_pack=pack_correspond(lower_correspond,n,device) if expression_phase else None
+            loop_timing['correspondence_s']+=correspondence_s
+            loop_timing['correspondence_steps']+=1
+        for i,(tri,bc,normal,target) in (correspond.items() if loss_mode=='legacy' else ()):
             surf=(fit_v[i,tri]*bc[:,:,None]).sum(1)
             residual=((surf-target)*normal).sum(1)/.002
             loss+=frame_loss_weights[i]*torch.nn.functional.smooth_l1_loss(
@@ -161,17 +223,21 @@ def correct(sequence,initial,output,runtime,device='cuda',steps=80,identity_fiel
                     loss+=frame_loss_weights[i]*.1*(torch.relu(gaps-.002)/.003).square().mean()
         lower_loss=v.sum()*0
         if expression_phase:
-            for i,(tri,bc,normal,target) in lower_correspond.items():
+            for i,(tri,bc,normal,target) in (lower_correspond.items() if loss_mode=='legacy' else ()):
                 surf=(fit_v[i,tri]*bc[:,:,None]).sum(1)
                 residual=((surf-target)*normal).sum(1)/.002
                 lower_loss+=frame_loss_weights[i]*lowerface_weight*torch.nn.functional.smooth_l1_loss(
                     residual,torch.zeros_like(residual),beta=1.)
         loss+=lower_loss
+        if loss_mode=='batch':
+            loss+=batch_loss()
         loss+=.01*(dr/.02).square().mean()+.01*(dt/.003).square().mean()
         loss+=.02*(de/.2).square().mean()+.02*(dj/.03).square().mean()
         for i,j in temporal:
             loss+=.002*((de[j]-de[i]).square().mean()+(dj[j]-dj[i]).square().mean())/max(len(temporal),1)
+        sync();loss_end=time.perf_counter()
         loss.backward()
+        sync();backward_end=time.perf_counter()
         if expression_phase:dr.grad=None;dt.grad=None
         else:de.grad=None;dj.grad=None
         opt.step()
@@ -181,7 +247,14 @@ def correct(sequence,initial,output,runtime,device='cuda',steps=80,identity_fiel
             de.clamp_(-.2,.2);dj.clamp_(-.03,.03)
             if fixed_reference is not None:
                 for variable in (dr,dt,de,dj):variable[fixed_reference].zero_()
-        if step%20==0 or step==steps-1:
+        sync();opt_end=time.perf_counter()
+        loop_timing['forward_s']+=forward_end-loop_started
+        loop_timing['loss_s']+=loss_end-forward_end-correspondence_s
+        loop_timing['backward_s']+=backward_end-loss_end
+        loop_timing['opt_s']+=opt_end-backward_end
+        loop_timing['step_s']+=opt_end-loop_started-correspondence_s
+        # Record-only: per-20-step samples plus the last step of each phase.
+        if step%20==0 or step in (expr_start-1,expr_end-1,steps-1):
             history.append(dict(step=step,phase='expression_jaw' if expression_phase else 'rigid',objective=float(loss.detach()),
                                 lowerface_depth_objective=float(lower_loss.detach()),objective_scope='before_optimizer_update'))
             print(history[-1],flush=True)
@@ -261,6 +334,8 @@ def correct(sequence,initial,output,runtime,device='cuda',steps=80,identity_fiel
         shape_exactly_fixed=bool(np.array_equal(out['shape'],saved['shape'])),scale_variable=False,calibration_fixed=True,
         translation_bound_mm=3.,rotation_bound_rad=.02,expression_delta_bound=.2,jaw_delta_bound_rad=.03,
         fixed_ray_acceptance=correction,history=history,elapsed_s=time.perf_counter()-start,
+        timing=loop_timing,
+        timing_step_scope='loop wall time split: correspondence_s = CPU ray_surface refresh block; step_s = forward_s + loss_s + backward_s + opt_s; torch.cuda.synchronize() at each boundary; acceptance/exports excluded',
         identity_field=str(identity_field) if identity_field else None,
         fixed_reference_frame=rows[fixed_reference]['id'] if fixed_reference is not None else None,
         gauge='original FLAME coordinate frame, fixed shape and scale, original reference camera axes; only per-frame motion changes'),
@@ -280,4 +355,15 @@ if __name__=='__main__':
     p.add_argument('--identity-field',type=Path)
     p.add_argument('--lowerface-weight',type=float,default=.5,
                    help='reliable open-front lower-face depth in expression phase; 0 disables it')
-    a=p.parse_args();correct(a.sequence.resolve(),a.initial_fit.resolve(),a.output.resolve(),a.runtime.resolve(),a.device,a.steps,a.identity_field,a.lowerface_weight)
+    p.add_argument('--correspondence-interval',type=int,default=10,
+                   help='steps between surface correspondence refreshes (phase start always refreshes)')
+    p.add_argument('--expression-start',type=int,default=None,
+                   help='first expression/jaw step; default steps//2 (keeps the historic 40 at 80 steps)')
+    p.add_argument('--expression-end',type=int,default=None,
+                   help='exclusive expression/jaw end step; default 3*steps//4 (historic 60)')
+    p.add_argument('--loss-mode',choices=('legacy','batch'),default='legacy',
+                   help='legacy per-frame Python loss loop, or frame-dimension batch loss '
+                        'with identical weights/denominators/beta')
+    a=p.parse_args();correct(a.sequence.resolve(),a.initial_fit.resolve(),a.output.resolve(),a.runtime.resolve(),
+        a.device,a.steps,a.identity_field,a.lowerface_weight,a.correspondence_interval,
+        a.expression_start,a.expression_end,a.loss_mode)

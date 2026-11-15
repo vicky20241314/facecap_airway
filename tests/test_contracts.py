@@ -36,7 +36,7 @@ from head_rgbd.paths import PROJECT_ROOT, asset_paths, resolve_runtime_dir, veri
 from head_rgbd.reference_contract import inner_lip_gap_mm, observed_landmarks_m
 
 
-EXPECTED_VERSION = "0.7.0"
+EXPECTED_VERSION = "0.9.0"
 
 
 class VersionContract(unittest.TestCase):
@@ -57,7 +57,8 @@ class EntryPointContract(unittest.TestCase):
         parser = cli.build_parser()
         actions = [a for a in parser._actions if isinstance(a, argparse._SubParsersAction)]
         commands = set(actions[0].choices)
-        self.assertEqual(commands, {"run", "capture", "reconstruct", "export", "device", "assets"})
+        self.assertEqual(commands, {"run", "capture", "reconstruct", "rebuild",
+                                    "export", "device", "assets"})
 
     def test_no_research_mode_switch_exists(self):
         parser = cli.build_parser()
@@ -450,9 +451,10 @@ class ExportContract(unittest.TestCase):
             self.assertEqual(landmarks["states"]["open"]["mesh"], "head_open_m.obj")
             neck = json.loads((output / "neck_prominence.json").read_text(encoding="utf-8"))
             self.assertEqual(neck["base_algorithm_version"], "0.5.2")
-            self.assertEqual(neck["neck_method"], "two_feature_reference_appearance")
+            self.assertEqual(neck["neck_algorithm"], "reference_driven_neck_volume")
+            self.assertEqual(neck["neck_method"], "reference_driven_neck_volume")
             self.assertIs(neck["editing_mode"], True)
-            self.assertEqual(neck["geometry_source"], "reference_driven_appearance")
+            self.assertEqual(neck["geometry_source"], "reference_driven_neck_volume")
             self.assertIs(neck["subject_observation_matched"], False)
             self.assertFalse(neck["effective_enabled"])
             for state in ("closed", "open"):

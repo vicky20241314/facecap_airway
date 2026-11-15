@@ -8,7 +8,10 @@ Commands
 --------
 stages    print the stage/term catalogue transcribed from the delivery source
 inspect   describe what a run directory contains (read-only)
-analyze   read a completed run, record real objectives, write CSV/JSON/plots/report
+analyze   read a completed run, record real objectives, write CSV/JSON/plots/report.md/report.html
+converge  per-stage convergence plateau, phase-local gap and amortised time ledger
+gap       per-stage distance to the layered termination target, plus targeted candidates
+optimize  offline whitelisted parameter search against tiered terminal targets
 
 The analyser never launches a reconstruction, never touches the GPU and never
 writes inside the run directory.
@@ -120,6 +123,8 @@ def _new_output_dir(base: Path, label: str) -> Path:
 def command_analyze(args: argparse.Namespace) -> int:
     from .adapter import AdapterError, describe_inputs, ingest_skills, ingest_solver_logs, run_manifest
     from .diagnostics import depth_surface_error_mm, load_frame, support_label_summary
+    from .html_report import build_analysis_html
+    from . import neck_adapter
     from .objectives import ALL_STAGES
     from .plots import build_report, plot_gap_panel, plot_metrics, plot_stage_series, write_json, write_report
     from .recorder import IterationRecord, Recorder
@@ -229,6 +234,39 @@ def command_analyze(args: argparse.Namespace) -> int:
 
     support = support_label_summary(run_dir / "delivery" / "support.json")
 
+    neck_result = None
+    if args.neck_result:
+        neck_result = Path(args.neck_result).expanduser().resolve()
+        if not neck_result.is_dir():
+            print(f"ERROR: neck result not found: {neck_result}", file=sys.stderr)
+            return 2
+        neck_dir = neck_adapter.find_neck_dir(neck_result)
+        neck_adapter.ingest_neck_direct(recorder, neck_dir)
+        gates = neck_adapter.neck_gates(neck_result, neck_dir)
+        protection = gates.get("protection") or {}
+        upper = gates.get("upper_band") or {}
+        recorder.declare_stage("neck_direct.gates", has_iterations=False, notes=[
+            f"quick_check pass={gates.get('quick_pass')}; "
+            f"shared_topology={gates.get('shared_topology')}",
+            f"connection max positive crease={gates.get('connection_max_deg')} deg "
+            f"(the delivery records the value even when it exceeds the 20 deg gate)",
+            f"protection pass={protection.get('pass')} "
+            f"fixed_max={protection.get('fixed_max_mm')} mm",
+            f"upper band no_increase={upper.get('no_increase')}",
+            "acceptance gates are booleans, not a numeric loss; they are not "
+            "converted to 1/0",
+        ])
+        diagnostics_note.append(
+            f"颈部轨迹来自 {neck_dir}；验收门为布尔值，不参与 loss 求和"
+        )
+    else:
+        recorder.gap(
+            "neck_direct",
+            "no --neck-result supplied: the direct neck trace and its acceptance "
+            "gates were not read; the tool does not infer them from the final mesh",
+            expected_tier="solver_objective",
+        )
+
     out_dir = (
         Path(args.output).expanduser().resolve()
         if args.output
@@ -271,13 +309,24 @@ def command_analyze(args: argparse.Namespace) -> int:
         extra_notes=notes,
     )
     report_path = write_report(out_dir / "report.md", report)
+    html_path = write_report(out_dir / "report.html", build_analysis_html(
+        payload,
+        stage_catalogue=_catalogue_rows(),
+        mode_variants=_variant_rows(),
+        input_summary={**summary, "support": support},
+        metrics=metrics or None,
+        extra_notes=notes,
+        figures=figures,
+    ))
     write_json(out_dir / "summary.json", {
         "run_dir": str(run_dir),
         "output_dir": str(out_dir),
         "records": str(json_path),
         "csv": str(csv_path),
         "report": str(report_path),
+        "html": str(html_path),
         "figures": figures,
+        "neck_result": str(neck_result) if neck_result else None,
         "gaps": len(payload.get("gaps", [])),
         "iterations": len(payload.get("iterations", [])),
         "support": support,
@@ -288,6 +337,7 @@ def command_analyze(args: argparse.Namespace) -> int:
     print(json.dumps({
         "output_dir": str(out_dir),
         "report": str(report_path),
+        "html": str(html_path),
         "records": str(json_path),
         "csv": str(csv_path),
         "figures": figures,
@@ -298,6 +348,63 @@ def command_analyze(args: argparse.Namespace) -> int:
         ],
     }, ensure_ascii=False, indent=2))
     return 0
+
+
+def command_gap(args: argparse.Namespace) -> int:
+    from .gap_report import compute_gaps, write_outputs
+
+    run_dir = Path(args.run).expanduser().resolve()
+    if not run_dir.is_dir():
+        print(f"ERROR: run directory not found: {run_dir}", file=sys.stderr)
+        return 2
+    dense_dir = (Path(args.dense).expanduser().resolve()
+                 if args.dense else run_dir / "reconstruction" / "dense")
+    if not dense_dir.is_dir():
+        print(f"ERROR: dense directory not found: {dense_dir}", file=sys.stderr)
+        return 2
+    result_dir = Path(args.neck_result).expanduser().resolve() if args.neck_result else None
+    if result_dir is not None and not result_dir.is_dir():
+        print(f"ERROR: result directory not found: {result_dir}", file=sys.stderr)
+        return 2
+    trace_dir = Path(args.trace).expanduser().resolve() if args.trace else None
+    if trace_dir is not None and not trace_dir.is_dir():
+        print(f"ERROR: trace directory not found: {trace_dir}", file=sys.stderr)
+        return 2
+    landmarks = Path(args.landmarks).expanduser().resolve() if args.landmarks else None
+    out_dir = (Path(args.output).expanduser().resolve()
+               if args.output else _new_output_dir(DEFAULT_OUTPUT, "gaps"))
+
+    report = compute_gaps(
+        run_dir=run_dir,
+        dense_dir=dense_dir,
+        result_dir=result_dir,
+        landmarks=landmarks,
+        trace_dir=trace_dir,
+    )
+    paths = write_outputs(report, out_dir)
+    print(json.dumps({
+        "output_dir": paths["output_dir"],
+        "report": paths["report"],
+        "gaps_json": paths["gaps_json"],
+        "csv": paths["csv"],
+        "dominant": (report.get("dominant") or {}).get("key"),
+        "dominant_status": (report.get("dominant") or {}).get("status"),
+        "targeted": [item["key"] for item in report.get("targeted") or []],
+        "gaps": report.get("gaps"),
+    }, ensure_ascii=False, indent=2))
+    return 0
+
+
+def command_optimize(args: argparse.Namespace) -> int:
+    from .optimizer import run_optimizer
+
+    return run_optimizer(args)
+
+
+def command_converge(args: argparse.Namespace) -> int:
+    from .converge import run_converge
+
+    return run_converge(args)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -338,8 +445,96 @@ def build_parser() -> argparse.ArgumentParser:
     analyze.add_argument("--label", help="run label used in the output directory name")
     analyze.add_argument("--max-depth-mm", type=float, default=30.0,
                          help="ray hit depth gate in mm (default 30, same order as the algorithm's 30 mm query)")
+    analyze.add_argument("--neck-result", type=Path,
+                         help="rebuild result directory (quick_check.json + neck dir); enables the "
+                              "direct neck trace and its acceptance gates")
     analyze.add_argument("--no-plots", action="store_true", help="write CSV/JSON/report only")
     analyze.set_defaults(func=command_analyze)
+
+    optimize = sub.add_parser(
+        "optimize",
+        help="offline whitelisted parameter search (plan by default; --execute to run)",
+    )
+    optimize.add_argument("--baseline-result", type=Path, required=True,
+                          help="delivered result directory used as the baseline (read-only)")
+    optimize.add_argument("--baseline-dense", type=Path, required=True,
+                          help="base dense directory of the baseline (fixed-ray tier)")
+    optimize.add_argument("--baseline-run", type=Path,
+                          help="base run directory holding logs/ (default: the run that owns "
+                               "--baseline-dense, else --baseline-result)")
+    optimize.add_argument("--baseline-neck", type=Path,
+                          help="neck directory of the baseline (default: resolved from quick_check)")
+    optimize.add_argument("--baseline-trace", type=Path,
+                          help="optional neck directory holding loss_direct.json for the baseline trace")
+    optimize.add_argument("--targeted", action="store_true",
+                          help="select at most two candidates from the dominant gap instead of the "
+                               "full one-move plan")
+    optimize.add_argument("--capture", type=Path,
+                          help="capture folder, required when a candidate changes a base parameter")
+    optimize.add_argument("--output", type=Path,
+                          help="new output directory (default: runtime/loss_analysis/<stamp>_neck_optimizer)")
+    optimize.add_argument("--candidate", action="append", metavar="KEY=VALUE",
+                          help="explicit candidate override (whitelisted key); "
+                               "when omitted a one-move plan is generated")
+    optimize.add_argument("--limit", type=int, default=12,
+                          help="maximum generated candidates (hard cap 12)")
+    optimize.add_argument("--execute", action="store_true",
+                          help="run the selected candidates; without it only the plan is written")
+    optimize.add_argument("--max-candidates", type=int, default=1,
+                          help="how many candidates to execute (default 1)")
+    optimize.add_argument("--freeze-landmarks", action="store_true",
+                          help="forward the baseline neck_landmarks.json to candidates; "
+                               "off by default so the live prepared recheck runs")
+    optimize.add_argument("--neck-only-dense", action="store_true",
+                          help="run neck-only candidates off the baseline dense "
+                               "(no prepared/, so T3 is skipped and the delivery is "
+                               "not_usable); default re-runs base from --capture")
+    optimize.add_argument("--landmarks", type=Path,
+                          help="baseline neck_landmarks.json (default: <baseline>/../neck_landmarks.json)")
+    optimize.add_argument("--timeout-s", type=int, default=3600,
+                          help="per-candidate rebuild timeout (default 3600 s)")
+    optimize.add_argument("--no-figures", action="store_true",
+                          help="do not draw solver-trace figures")
+    optimize.set_defaults(func=command_optimize)
+
+    gap = sub.add_parser(
+        "gap",
+        help="per-stage distance to the layered termination target (read-only)",
+    )
+    gap.add_argument("--run", type=Path, required=True,
+                     help="base run directory holding run_report.json and logs/")
+    gap.add_argument("--dense", type=Path,
+                     help="base dense directory (default: <run>/reconstruction/dense)")
+    gap.add_argument("--neck-result", type=Path,
+                     help="delivered result directory (quick_check.json + neck dir); "
+                          "without it the acceptance layer is recorded as a gap")
+    gap.add_argument("--trace", type=Path,
+                     help="neck directory holding loss_direct.json (default: resolved neck dir)")
+    gap.add_argument("--landmarks", type=Path,
+                     help="neck_landmarks.json used by the delivery (marker semantics)")
+    gap.add_argument("--output", type=Path,
+                     help="new output directory (default: runtime/loss_analysis/<stamp>_gaps)")
+    gap.set_defaults(func=command_gap)
+
+    converge = sub.add_parser(
+        "converge",
+        help="per-stage convergence plateau, phase-local gap and amortised time ledger (read-only)",
+    )
+    converge.add_argument("--run", type=Path, action="append", default=[],
+                          help="completed run directory; repeatable, aggregated")
+    converge.add_argument("--reference-run", type=Path, action="append", default=[],
+                          help="completed run shown separately, excluded from the aggregate")
+    converge.add_argument("--epsilon", type=float, default=0.002,
+                          help="remaining-potential threshold for a plateau marker "
+                               "(default 0.002 = 0.2%%)")
+    converge.add_argument("--persist-steps", type=int, default=60,
+                          help="a plateau must persist at least this many steps "
+                               "(default 60; the logs print every 20 steps)")
+    converge.add_argument("--output", type=Path,
+                          help="new output directory (default: runtime/loss_analysis/<stamp>_converge)")
+    converge.add_argument("--no-figures", action="store_true",
+                          help="do not draw per-stage objective figures")
+    converge.set_defaults(func=command_converge)
     return parser
 
 

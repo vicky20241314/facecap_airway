@@ -22,6 +22,7 @@ from core.capture import (
 )
 from head_rgbd.paths import configure_environment, ensure_runtime_layout, write_json_exclusive
 from head_rgbd.capture_ui import CapturePanel
+from head_rgbd import aruco_marker as am
 
 
 CAPTURE_SCHEMA = "head_rgbd.capture.v1"
@@ -46,12 +47,17 @@ PREVIEW_INSTRUCTIONS = {
 class _CapturePreview:
     """One owned HighGUI window for the entire multi-pose capture session."""
 
-    def __init__(self):
+    def __init__(self, marker_spec: am.ArucoSpec | None = None,
+                 marker_cfg: dict | None = None):
         self.opened = False
         self._panel = CapturePanel()
         self._ready = False
         self._button_pressed = False
         self._start_requested = False
+        self._marker_spec = marker_spec or am.ArucoSpec()
+        self._marker_cfg = dict(marker_cfg or {})
+        self._marker_frames = 0
+        self.last_marker: dict | None = None
 
     def _on_mouse(self, event, x, y, _flags, _param):
         left, top, right, bottom = self._panel.BUTTON
@@ -79,12 +85,25 @@ class _CapturePreview:
             cv2.resizeWindow(CAPTURE_WINDOW, *self._panel.SIZE)
             self.opened = True
             cv2.setMouseCallback(CAPTURE_WINDOW, self._on_mouse)
-        self._ready = status.startswith("SPACE:")
+        self._ready = status.startswith(("SPACE:", "RETRY:"))
         if not self._ready:
             self._button_pressed = self._start_requested = False
+        # Detection uses the original RGB frame, before any display mirroring in
+        # the panel.  The preview is advisory; prepared recheck is authoritative.
+        self._marker_frames += 1
+        if self.last_marker is None or self._marker_frames % 2 == 0:
+            try:
+                self.last_marker = am.detect_candidates(
+                    frame.rgb, self._marker_spec, self._marker_cfg,
+                    depth=frame.depth, intrinsics=frame.intrinsics)
+            except Exception as exc:
+                self.last_marker = {"selected": None,
+                                    "rejection": f"detection_error:{type(exc).__name__}"}
+        marker_line = am.preview_marker_line(self.last_marker or {})
         title, guidance = PREVIEW_INSTRUCTIONS.get(instruction, ("调整采集姿态", instruction))
         shown = self._panel.render(frame.rgb, title, guidance, status,
-                                   original_instruction=instruction, pressed=self._button_pressed)
+                                   original_instruction=instruction, pressed=self._button_pressed,
+                                   marker_line=marker_line)
         cv2.imshow(CAPTURE_WINDOW, shown)
         return shown
 
@@ -230,6 +249,9 @@ def _detect_face_metadata(rgb: np.ndarray) -> dict:
         }
 
 
+FRAME_STALL_S = 5.0
+
+
 def _capture_frames(
     capture: OrbbecCapture,
     count: int,
@@ -240,17 +262,28 @@ def _capture_frames(
     *,
     countdown_s: int = 0,
     preview_window: _CapturePreview | None = None,
+    retry_reason: str | None = None,
+    frame_timeout_s: float = FRAME_STALL_S,
 ) -> list[CapturedFrame]:
     result: list[CapturedFrame] = []
     window = (preview_window or _CapturePreview()) if preview else None
     try:
         if window is not None and wait_for_input:
+            wait_status = "SPACE: start | click Start capture | ESC: cancel"
+            if retry_reason:
+                wait_status = f"RETRY: {retry_reason}"
+            last_frame_at = time.monotonic()
             while True:
                 if window.poll() == 32:
                     break
                 frame = capture.read_with_metadata()
                 if frame is not None:
-                    window.show(frame, instruction, "SPACE: start | click Start capture | ESC: cancel")
+                    last_frame_at = time.monotonic()
+                    window.show(frame, instruction, wait_status)
+                elif time.monotonic() - last_frame_at > frame_timeout_s:
+                    raise CaptureStalled(
+                        f"no camera frame for {frame_timeout_s:.1f} s while waiting "
+                        f"for {instruction!r}; check the device connection")
                 if window.poll() == 32:
                     break
 
@@ -267,7 +300,13 @@ def _capture_frames(
                 window.poll()
 
         next_capture = time.monotonic()
+        last_frame_at = next_capture
         while len(result) < count:
+            now = time.monotonic()
+            if now - last_frame_at > frame_timeout_s:
+                raise CaptureStalled(
+                    f"no camera frame for {frame_timeout_s:.1f} s while recording "
+                    f"{instruction!r}; check the device connection")
             if window is not None:
                 window.poll()
             frame = capture.read_with_metadata()
@@ -277,11 +316,11 @@ def _capture_frames(
                 window.poll()
             if frame is None:
                 continue
-            now = time.monotonic()
-            if now < next_capture:
+            last_frame_at = time.monotonic()
+            if last_frame_at < next_capture:
                 continue
             result.append(frame)
-            next_capture = now + interval_s
+            next_capture = last_frame_at + interval_s
         return result
     finally:
         if window is not None and preview_window is None:
@@ -298,6 +337,73 @@ def _wait_for_user(instruction: str, auto: bool, countdown_s: int) -> None:
         time.sleep(1)
 
 
+class MarkerValidationError(RuntimeError):
+    """Live capture gate failed and no explicit fallback was requested."""
+
+
+class CaptureStalled(RuntimeError):
+    """The camera stopped delivering frames; surfaced instead of a silent loop."""
+
+
+MARKER_REASON_HINTS = {
+    "no_marker_detected": "未检测到 ArUco；确认贴纸在画面内并正对相机",
+    "multiple_marker_ids": "画面内出现多个不同 ID；只保留一张贴纸",
+    "duplicate_target_id": "同一 ID 出现两份；移开多余贴纸或只保留一张",
+    "size_insufficient_corners": "标记角点深度不足；调整距离/角度，避开深度空洞",
+    "size_out_of_range": "黑方块估计尺寸超出 8–40 mm；调整距离或贴纸尺寸",
+    "size_unstable": "黑方块尺寸估计不稳定；让贴纸平整并正对相机",
+    "quad_area_too_small": "标记太小；靠近相机",
+    "quad_side_too_short": "标记边缘太短；靠近相机",
+    "cell_pitch_below_limit": "标记分辨率不足；靠近相机",
+    "quad_side_ratio_excessive": "标记透视过强；正对相机",
+    "quad_corner_angle_out_of_range": "标记透视过强；正对相机",
+    "quad_not_convex": "标记四边形不合法；调整角度",
+}
+
+
+def marker_failure_hint(reason: str | None) -> str:
+    return MARKER_REASON_HINTS.get(str(reason), "调整贴纸位置/角度后重拍")
+
+
+def _marker_validation_payload(marker_states: dict[str, dict], allow_fallback: bool,
+                               error: BaseException | None = None) -> dict:
+    statuses = [row.get("status") for row in marker_states.values()]
+    if error is not None:
+        status = "failed"
+    elif statuses and all(s == am.STATUS_OBSERVED for s in statuses):
+        status = "usable"
+    else:
+        status = "not_usable"
+    payload = {
+        "schema": "head_rgbd.capture.marker_validation.v1",
+        "created_at": datetime.now().astimezone().isoformat(),
+        "status": status,
+        "policy": {
+            "required": not allow_fallback,
+            "allow_marker_fallback": bool(allow_fallback),
+            "dictionary": am.DICTIONARY_NAME,
+            "auto_id": True,
+            "black_square_range_mm": [8.0, 40.0],
+            "preview_is_authoritative": False,
+            "prepared_recheck_authoritative": True,
+        },
+        "states": marker_states,
+        "note": ("live preview is advisory; the prepared front-frame recheck in "
+                 "neck_landmark_aruco is the authoritative record"),
+    }
+    if error is not None:
+        payload["error"] = f"{type(error).__name__}: {error}"
+    return payload
+
+
+def _write_marker_validation(folder: Path, marker_states: dict[str, dict],
+                             allow_fallback: bool,
+                             error: BaseException | None = None) -> dict:
+    payload = _marker_validation_payload(marker_states, allow_fallback, error)
+    write_json_exclusive(folder / "marker_validation.json", payload)
+    return payload
+
+
 def capture_session(
     *,
     runtime: str | Path | None,
@@ -309,6 +415,7 @@ def capture_session(
     countdown_s: int = 2,
     preview: bool = True,
     auto: bool = False,
+    allow_marker_fallback: bool = False,
 ) -> Path:
     """Capture a guided, no-overwrite multi-segment session."""
     if frames_per_view < 2:
@@ -346,6 +453,7 @@ def capture_session(
     }
     capture = OrbbecCapture(timeout_ms=1000)
     preview_window = _CapturePreview() if preview else None
+    marker_states: dict[str, dict] = {}
     try:
         capture.start()
         manifest["device"] = _device_info_dict(capture.device)
@@ -365,16 +473,49 @@ def capture_session(
                 print(f"\n{instruction}", flush=True)
             else:
                 _wait_for_user(instruction, auto, countdown_s)
-            frames = _capture_frames(
-                capture,
-                frames_per_view,
-                interval_s,
-                preview,
-                not auto,
-                instruction,
-                countdown_s=countdown_s if preview else 0,
-                preview_window=preview_window,
-            )
+            gate = None
+            decision = None
+            attempts_all: list[dict] = []
+            attempt = 0
+            retry_reason: str | None = None
+            while True:
+                frames = _capture_frames(
+                    capture,
+                    frames_per_view,
+                    interval_s,
+                    preview,
+                    not auto,
+                    instruction,
+                    countdown_s=countdown_s if preview else 0,
+                    preview_window=preview_window,
+                    retry_reason=retry_reason,
+                )
+                if view != "front":
+                    break
+                gate = am.evaluate_frames(
+                    frames, state,
+                    frame_id_prefix=f"live_{state}_{view}_a{attempt}")
+                gate["attempts"] = attempts_all + gate["attempts"]
+                gate["attempt"] = attempt
+                marker_states[state] = gate
+                decision = am.marker_gate_decision(gate, auto, allow_marker_fallback)
+                if decision != "retake":
+                    if decision == "fallback":
+                        print(f"marker validation failed for {state} front: "
+                              f"{gate.get('reason')} "
+                              f"({marker_failure_hint(gate.get('reason'))}); "
+                              f"explicit fallback -> not_usable", flush=True)
+                    break
+                reason = gate.get("reason")
+                hint = marker_failure_hint(reason)
+                print(f"marker validation failed for {state} front: {reason} ({hint})"
+                      + ("; retake in the preview (SPACE/click)" if preview else "; retake"),
+                      flush=True)
+                attempts_all = list(gate["attempts"])
+                attempt += 1
+                retry_reason = f"{state} front: {reason} — {hint}"
+                if not preview:
+                    input("Press Enter to retake the front pose...")
             filename = f"segment_{segment_index:02d}_{state}_{view}.npz"
             arrays = _save_segment(folder / filename, frames)
             metadata = []
@@ -390,6 +531,10 @@ def capture_session(
                 "frame_records": metadata,
                 "quality": _segment_quality(arrays, metadata),
             }
+            if view == "front" and gate is not None:
+                if decision == "fallback":
+                    gate["fallback_used"] = True
+                segment["marker_validation"] = gate
             manifest["segments"].append(segment)
             with (folder / f"segment_{segment_index:02d}.json").open(
                 "x", encoding="utf-8"
@@ -397,6 +542,10 @@ def capture_session(
                 json.dump(segment, stream, ensure_ascii=False, indent=2, allow_nan=False)
                 stream.write("\n")
             print(f"saved {segment['id']} ({len(frames)} frames)", flush=True)
+            if view == "front" and decision == "abort":
+                raise MarkerValidationError(
+                    f"{state} front marker invalid: {gate.get('reason')} "
+                    f"({marker_failure_hint(gate.get('reason'))})")
 
         dimensions = {
             (row["width"], row["height"])
@@ -417,6 +566,10 @@ def capture_session(
                 float(np.median(sync_values)) if sync_values else None
             ),
         )
+        marker_payload = _write_marker_validation(folder, marker_states,
+                                                  allow_marker_fallback)
+        manifest["marker_validation"] = marker_payload
+        manifest["marker_status"] = marker_payload["status"]
         manifest["status"] = "complete"
         manifest["completed_at"] = datetime.now().astimezone().isoformat()
         write_json_exclusive(folder / "session.json", manifest)
@@ -426,6 +579,16 @@ def capture_session(
         manifest["status"] = "aborted"
         manifest["aborted_at"] = datetime.now().astimezone().isoformat()
         manifest["abort_reason"] = f"{type(exc).__name__}: {exc}"
+        try:
+            marker_payload = _marker_validation_payload(
+                marker_states, allow_marker_fallback, error=exc)
+            manifest["marker_validation"] = marker_payload
+            manifest["marker_status"] = marker_payload["status"]
+            if not (folder / "marker_validation.json").exists():
+                write_json_exclusive(folder / "marker_validation.json", marker_payload)
+        except Exception as marker_exc:
+            manifest["marker_validation_error"] = (
+                f"{type(marker_exc).__name__}: {marker_exc}")
         partial = folder / "session.partial.json"
         if not partial.exists():
             write_json_exclusive(partial, manifest)

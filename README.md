@@ -17,9 +17,13 @@
 重建与导出流程。双击启动遇到错误时，窗口会保留错误信息，按任意键后关闭。
 查看帮助请使用 `headrgbd.cmd --help` 或 `headrgbd.ps1 -Help`。
 
+> `run`、`reconstruct`、`rebuild` 默认都做基础头模 + **C（anatomy prior）直接颈部**；`--base-only`
+> 只做基础头模。已有采集（或原始多视角采集）做一键重建 + 颈部重塑，用 §0 的
+> `.\headrgbd.cmd rebuild --capture ... --output ...`。
+
 0.5.2 默认采用 joint + fast + lean：观测准备 → 正面初始化 → 正侧联合身份 → 一次运动校正
-→ 一套低频/中频形变 → 安全 Loop 细分与闭口/张口交付。`run`、`reconstruct`、cmd 与 PowerShell
-包装入口读取同一份 `config/defaults.json`，无需额外填写模式参数。
+→ 一套低频/中频形变 → 安全 Loop 细分与闭口/张口交付。`run`、`reconstruct`、`rebuild`、cmd 与
+PowerShell 包装入口读取同一份 `config/defaults.json`，无需额外填写模式参数。
 默认只在 `delivery` 写出最终闭口、张口两个 OBJ；`reconstruction` 保留参数与检查记录，
 不再导出 coarse、插值、平滑基面、支持度着色或运动对照网格。
 耗时、最终网格一致性及存储变化见 [输出精简验证报告](docs/MINIMAL_OUTPUT_REPORT.md)。
@@ -38,6 +42,111 @@ Loop 目标 0.5，先检查几何安全，失败才回退；默认不做三候�
 目标为固定剖面上实测的最终隆起高度（配置默认 8 mm），由“宽基底 + 圆钝脊峰”双场实现并按形状与几何安全
 双重验收；关闭时输出与纯 0.5.2 基线按字节一致。参数在 `config/defaults.json` 的 `neck_prominence` 节，
 验收与渲染见 [颈前塑形 V2 报告](docs/NECK_PROMINENCE_V2_REPORT.html)。
+
+---
+
+## 0. 一键重建 + 颈部重塑（`rebuild`，推荐的交付入口）
+
+`rebuild` 是**一键重建 + 重塑**入口：先跑现行锁定头部重建（基础 dense，强制
+`--neck-prominence off`，旧颈前外观塑形不参与），再在原始网格上直接重塑颈部（`neck_direct_v2`，
+解剖定位 + V 形喉结先验），最后输出**人头 + 重塑颈部**。
+
+```pwsh
+# 新采集/原始多视角采集：重建 + 颈部重塑
+.\headrgbd.cmd rebuild --capture runtime/captures/<session> --output runtime/outputs/<name>
+
+# 已经做过基础 dense，只重跑颈部：跳过基础重建
+.\headrgbd.cmd rebuild --dense runtime/outputs/<name>/reconstruction/dense --output runtime/outputs/<name>/rebuild
+```
+
+`rebuild` 的输出在 `<output>/result/`。**快速路径默认是 minimal output**：
+不写渲染图，也不写只用于展示的重复网格；`--render` 与 `--no-minimal-output`
+可恢复完整展示输出（`config/defaults.json` 的 `rebuild` 段控制默认值）。
+
+| 文件 | 内容 |
+|---|---|
+| `final/head_closed.obj` / `head_open.obj` | **最终人头 + 重塑颈部**（闭/张；同一面表；下游规范路径） |
+| `final/anatomical_landmarks.json` + `manifest.json` | 下游自动配对的 sidecar / 自包含 manifest |
+| `measured/head_closed.obj` / `head_open.obj` | 基础 dense 重建的测量网格（无 C 重塑；下游规范路径） |
+| `measured/anatomical_landmarks.json` + `manifest.json` | 同一标记观测的测量交付 sidecar / manifest |
+| `head_closed.obj` / `head_open.obj` | 根目录兼容副本（旧脚本；**不做下游自动配对**） |
+| `quick_check.json` | 从交付 OBJ 重读的快速验收 |
+| `REBUILD_REPORT.md` | compact 验收摘要（`--no-minimal-output` 时为完整报告） |
+| `neck_closed.obj` / `neck_open.obj` | 仅 `--no-minimal-output`：重塑颈部子网格（B+C；头侧边界开放） |
+| `base_head_closed.obj` / `base_head_open.obj` | 仅 `--no-minimal-output`：基础头部展示副本 |
+| `render/` | 仅 `--render`：标准颈部/整体图 + 喉结近景、线框、水平剖面、θ≈0 relief/目标剖面 |
+
+`build_direct.json` 不再复制到 `result/`；构建/操作日志保留在
+`<output>/neck_direct_v2/build_direct.json`。基础重建的流水线参数仍在
+`<output>/reconstruction/dense/parameters.npz` 与 `reference_geometry.json`。
+
+快速路径默认 `loss_mode=batch`：fit_c / motion_v2 的逐帧 loss 项按帧维批量求值，
+权重、分母、归一化、robust beta、先验和 frame_weight 语义与旧循环一致
+（`--loss-mode legacy` 可复现旧的逐帧路径）。P1 的步数/刷新缩减未设为默认：
+实测会改变下游颈部 remesh 路径并触发验收项退化，详见
+`runtime/outputs/_speedup_final_20261115_234941/REBUILD_REPORT.md`。
+
+基础重建与数据保留在 `<output>/reconstruction/`、`<output>/delivery/`；颈部构建/验收/消融在
+`<output>/neck_direct_v2*/`。
+
+### ArUco live 门禁与双套自包含交付
+
+live `run` 的 front 预览会自动检测 `DICT_4X4_50` ArUco（自动 ID、深度估计黑方块尺寸、质量原因），
+每个状态结束前必须至少一帧通过质量/唯一性/尺寸校验；`--auto` 失败即中止，
+显式 `--allow-marker-fallback` 才继续并写 `manifest.status=not_usable`。有预览时失败会直接切到
+「需要重拍」状态：显示原因与修正提示，按空格或点「重新采集」重拍、ESC 取消（不再等控制台回车）。
+相机连续 5 s 无帧会中止并写 `session.partial.json` 的 `abort_reason`（CLI 返回 `capture_stalled`），
+不会静默停在「采集中」。prepared 生成后
+`head_rgbd.tools.neck_landmark_aruco` 会**重新检测并以 prepared 为权威**，把标记中心变换到 dense
+参考帧，校验 `0.35 <= t <= t_gate+0.025`、`|θ|<=20°`、最近表面法向和表面距离；失败的标记不会
+驱动 C，也不会出现在可配对 sidecar 中。
+
+```pwsh
+# 手动复检（通常由 rebuild 自动执行；显式路径可复现）
+.\runtime\env\python.exe -m head_rgbd.tools.neck_landmark_aruco `
+  --prepared runtime/outputs/<name>/prepared `
+  --dense runtime/outputs/<name>/reconstruction/dense `
+  --output runtime/outputs/<name>/neck_landmarks.json
+
+# 已有标记 sidecar 时只重跑颈部
+.\headrgbd.cmd rebuild --dense runtime/outputs/<name>/reconstruction/dense `
+  --output runtime/outputs/<name>/rebuild `
+  --neck-landmarks runtime/outputs/<name>/neck_landmarks.json
+```
+
+`result/` 规范下游路径是两个自包含目录（根目录 `head_*.obj` 只是兼容副本，不做自动配对）：
+
+```text
+result/final/       head_closed.obj + head_open.obj + anatomical_landmarks.json + manifest.json
+result/measured/    head_closed.obj + head_open.obj + anatomical_landmarks.json + manifest.json
+```
+
+- `final/` 是 C 重塑网格；`measured/` 是未做 C 的基础 dense 网格；两者参考帧/单位一致，几何不同。
+- sidecar：`schema=head_rgbd.delivery.anatomical_landmarks.v2`，`source=aruco_marker`，
+  `main_delivery_mesh_file` 与 `manifest.mesh.states.path` 同名；优先锚点是
+  `skin_estimate_reference_m`；`mesh_binding`/`main_head_mesh_binding` 明确 `not_completed`，
+  不伪造主头模三角绑定。
+- 标记只驱动 C 的喉结中心 `t`，`θ` 固定 0，幅度仍为 `larynx_prior_ratio × jaw_reference`；
+  larynx gain 的轴向中心同步到该状态 `t`。标记位于 `t_gate` 之外或法向门失败时判无效。
+- 标记优先：折痕/连接验收超限时**不回退 menton**，`quick_check`/`REBUILD_REPORT.md` 如实
+  `connection=false`；网格、sidecar 与 manifest 仍交付。
+- 离线 `reconstruct`、`rebuild --capture/--dense` 没有有效标记时仍可回退 C，但
+  `manifest.status=not_usable` 且**不写可配对 sidecar**；旧结果不被覆盖。
+- 下游 `head_windpipe_regis` 对 `final/` 和 `measured/` 的自动配对/输入校验/配准结果记录在
+  `result/T6_DOWNSTREAM.md`；D1/D2/间隙 pass/fail 如实保留，不改下游算法换 pass。
+
+### 颈部变体与回退
+
+- **默认 `--neck-variant prior`（C：anatomy + prior）**：使用受试者喉结解剖中心 + V 形先验，喉结更明确。已知代价：liguanghao 张口全边集/B 正向锐化 **22.16° >20°**；`quick_check`/`REBUILD_REPORT.md` 会如实标记 `connection=false`，不是隐藏成通过。若 20° 是不可放宽的硬线，请显式选 `--neck-variant auto` 或 `no-prior`。
+- `--neck-variant auto`：先做 prior，若全边集/B 正向锐化超过 `--crease-limit`（默认 20°）再生成 no-prior，选择通过限制且喉结更明确的；两者都超限选最大值较小者。
+- `--neck-variant no-prior`：始终 no-prior，20° 内最稳、喉结较柔和。
+- 默认只做**快速验收**（从交付 OBJ 重读：保护、拓扑、两态面表、全边集/B 正向锐化、喉结局部、上颈密带是否加密）。加 `--full-verify` 会额外构建零拓扑/零新增点消融并运行完整的 S0–S9
+  `verification.json`。快速路径默认 `--minimal-output`（不出图、不写展示副本），`--render` 恢复渲染，`--no-minimal-output` 恢复完整展示输出；`--base-only` 只做基础重建。
+- `run` / `reconstruct` / `rebuild` 三者默认都走同一 **C（prior）直接颈部**；`--base-only` 退回基础头模。旧的 `reference_driven_neck_volume` 只保留在 `export`/legacy 路径，不参与默认重建。
+
+> `rebuild` 不会用另一受试者的旧基线；基础 dense 的实际算法来源、dense 拓扑和
+> `neck`/`neck_refit` 状态会写进 `REBUILD_REPORT.md`。颈部先验/自动回退是受控的形状先验，
+> 不是对每一采集都承诺“测量到喉结”；闭口上颈背景、张口折痕等未完成项会在报告中如实列出。
 
 ---
 
@@ -73,7 +182,7 @@ Loop 目标 0.5，先检查几何安全，失败才回退；默认不做三候�
 ```
 facecap_airway_delivery/
 ├─ README.md                    本说明
-├─ VERSION                      0.5.7
+├─ VERSION                      0.9.0
 ├─ CHANGELOG.md
 ├─ VALIDATION.md                本机实际验证记录
 ├─ docs/FAST_PATH_REPORT.md     0.3.0 加速版算法：实测、消融与剩余热点（权威）
@@ -84,8 +193,11 @@ facecap_airway_delivery/
 │  ├─ defaults.json             默认算法与参数（唯一一套）
 │  └─ assets.json               模型文件 SHA256 清单
 ├─ head_rgbd/                   流水线源码
-│  ├─ cli.py                    入口
+│  ├─ cli.py                    入口（rebuild = 一键重建 + 颈部重塑）
 │  ├─ pipeline.py               唯一算法链路 + 导出契约
+│  ├─ rebuild.py                一键重建 + 直接颈部重塑编排/变体回退/快速验收
+│  ├─ neck_anatomy.py           喉结解剖定位（menton + 颈前法向门）+ V 形先验
+│  ├─ neck_direct.py / neck_fit.py / neck_remesh.py / neck_bridge.py  原始拓扑直接颈部塑形
 │  ├─ capture_session.py        引导采集
 │  ├─ prepare.py                数据准备、关键帧、追踪
 │  ├─ fit_c.py                  共享身份拟合
@@ -99,6 +211,8 @@ facecap_airway_delivery/
 ├─ third_party/                 FLAME 与 TUFA 源码（含各自 LICENSE）
 ├─ tests/test_contracts.py      小型核心契约测试
 ├─ tools/verify_delivery.py     只读复核交付输出
+├─ tools/build_neck_direct_v2.py / neck_direct_verify_v2.py / neck_direct_render_v2.py / larynx_prior_render.py
+│                               颈部重塑构建、独立验收、标准图、喉结近景/剖面
 └─ runtime/                     ← 不进入 Git
    ├─ env/                      Python 3.10 环境（含 CUDA 版 PyTorch）
    ├─ assets/                   模型权重
@@ -535,7 +649,34 @@ OSQP 迭代）。要再压缩需要改 QP 的缩放/条件数，本轮未做，�
 
 ## 10. 版本
 
-`0.7.0`。`VERSION`、`--version`、`README`、`manifest.json` 四处一致。
+`0.9.0`。`VERSION`、`--version`、`README`、`manifest.json` 四处一致。
+
+### 0.9.0 公共默认：参考驱动的颈部整体体积与过渡（当前）
+
+公共默认已切换为 `neck_prominence.algorithm=reference_driven_neck_volume`
+（实现 `head_rgbd/neck_volume.py`），由 `pipeline.export_delivery` 直接调用，不是新增的可选实验模式。
+它从 `zp_052_neck_bump_baseline` 的**未塑形基面**出发，用真实底部裁切面拟合轴向坐标、
+闭口中性身份的可追溯颏下断点确定共享尺度、多层横截面目标（宽/深/面积/中心偏移/前侧后轮廓/
+相邻截面变化速度）驱动**一个** C2 低频径向控制场，统一重塑整个颈部、颈侧、后颈、颈根与现有肩胸过渡；
+相关颈段与过渡区一致 1→4 细分并按目标光滑轮廓重求位置；整体形体验收合格后才追加最大 1.35 mm 的
+一段连续自然体量。允许受控内收（中颈）与外扩（颈根），不使用全局体积守恒，不迁移旧双峰场。
+底部裁切环保持两个闭合边界环，只有有界切平面内位移（轴向分量 0）；closed/open 通过顶点对应共享同一设计，
+张口状态按自身标志点做有界局部适配。
+
+旧环沟来自 `neck_dual` 双特征非负场的支持窗口与保护带，阶梯来自 0.6→0.7→0.8 局部雕刻累积，
+纵向棱面来自基础模板约 40 顶点/环的横向分辨率；本轮全部从基面重建，不再叠加修补。
+`head_scale.reference_head_dimensions` 的下巴误检（鼻尖 y=+1.52 mm、假头高 139.68 mm、
+纵向倍率 1.6368）已修正为颏下断点 y=−84.48 mm、头高 225.68 mm、H 比 1.013；旧「参考头更扁」结论撤回。
+
+交付：`runtime/outputs/neck_volume_transition_20261112_234500/final/head_closed_m.obj` 与
+`head_open_m.obj`（单位 m，79936 顶点 / 159616 面、共享拓扑），A/B/C 对照、全部审计 JSON、
+33 张同视角同光照渲染，报告 [NECK_VOLUME_AND_TRANSITION_REPORT.html](docs/NECK_VOLUME_AND_TRANSITION_REPORT.html)。
+`editing_mode=true` · `geometry_source=reference_driven_neck_volume` · `subject_observation_matched=false`。
+参考外观设计与模板补全如实标注，不是真实受试者颈肩测量；目标面部/下颌身份保持。
+CLI 可用 `--neck-algorithm continuous_reference` 调用历史 0.7.0 路径（`neck_dual`），
+`manual_edit` / `observation` 仍为历史/研究路径。
+
+以下 0.8 / 0.7 / 0.6 段落均为**历史记录**，不再是公共默认。
 
 0.8.0-candidate 头部比例实验（未切换公共默认）：对参考和目标用同一头部区域定义测得
 H/W/D = 139.7/158.6/186.6 与 228.6/190.4/223.7 mm；宽度/深度比一致约 1.20，头高比 1.64。
@@ -551,7 +692,7 @@ L50/H、A-B 间距、B 局部突出和尖端比例仍未通过；完整头尺度
 参考副本与比例资产已保存为 `assets/neck_reference/identity_rest_20261109.obj` /
 `identity_rest_20261109_asset.json`，公共默认配置已指向项目内资产，不再依赖外部历史实验目录。
 
-0.7.0 起公共默认的颈前阶段是**连续主次双特征参考外观**（`neck_prominence.algorithm=continuous_reference`，
+0.7.0（历史，已非公共默认）的颈前阶段是**连续主次双特征参考外观**（`neck_prominence.algorithm=continuous_reference`，
 实现为 `head_rgbd/neck_dual.py`）。参考 `identity_rest.obj` 的原始前表面在 σ=8 mm 背景上确有上下两处中央特征：
 feature_A（上、主，x≈0，y≈−104 mm，高 3.98 mm）和 feature_B（下、次，x≈0，y≈−127 mm，高 1.47 mm），
 中心距 23.0 mm、B/A=0.369、鞍部 1.14 mm（0.285A，浅而宽）。旧 0.6.0 单峰路径先在 y≥−125 的 ROI/门控
