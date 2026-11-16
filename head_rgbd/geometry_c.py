@@ -13,7 +13,7 @@ import trimesh
 
 from head_rgbd.ray_index import RayIndex
 from head_rgbd.contracts import temporal_edge_allowed
-from head_rgbd.fit_b import normals
+from head_rgbd.mesh_integrity import normals
 from head_rgbd.prepare import backproject
 
 

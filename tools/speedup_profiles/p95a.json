@@ -1,0 +1,6 @@
+{
+  "note": "P95 round A: algorithmic speed-ups only (neck solver/sampling/topology keys, section transform hoist, per-face dihedral, dense-stage import decoupling). No step, refresh-interval, weight or quality-setting change: the CLI is exactly the accepted P0+P2 default.",
+  "common": ["--loss-mode", "batch"],
+  "base": [],
+  "full": []
+}

@@ -11,7 +11,7 @@ import numpy as np
 
 from head_rgbd import __version__
 from head_rgbd.audit import sha
-from head_rgbd.fit_b import normals
+from head_rgbd.mesh_integrity import normals
 from head_rgbd.geometry_c import front_protected_vertices, ray_surface, sample_depth
 from head_rgbd.geometry_d import (Settings, anatomical_exclusion, child_landmarks, evidence,
                                  solve_field, subdivide, surface_state,

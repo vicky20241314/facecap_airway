@@ -14,17 +14,11 @@ from smplx.lbs import batch_rodrigues
 
 from head_rgbd.audit import dump,sha
 from head_rgbd.contracts import temporal_edge_allowed
+from head_rgbd.mesh_integrity import normals
 from head_rgbd.paths import asset_paths,configure_environment
 from head_rgbd.prepare import rigid,backproject
 from core.integrated_fitting import make_flame
 from core.fit_options import FitOptions
-
-
-def normals(v,f):
-    tri=v[f]; n=np.cross(tri[:,1]-tri[:,0],tri[:,2]-tri[:,0])
-    out=np.zeros_like(v)
-    for j in range(3): np.add.at(out,f[:,j],n)
-    return out/np.maximum(np.linalg.norm(out,axis=1,keepdims=True),1e-12)
 
 
 def visible(v,f,depth,intr,face_mask,tolerance=.015):

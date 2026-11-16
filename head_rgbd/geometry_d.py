@@ -9,12 +9,11 @@ from dataclasses import dataclass, asdict
 import time
 import cv2
 import numpy as np
-import trimesh
 from scipy import sparse
 from scipy.optimize import lsq_linear
 from scipy.sparse.linalg import lsmr
 
-from head_rgbd.fit_b import normals
+from head_rgbd.mesh_integrity import normals
 from head_rgbd.geometry_c import ray_surface, sample_depth
 
 

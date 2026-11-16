@@ -85,10 +85,7 @@ def edge_map(F):
 
 
 def valence(F, n):
-    v = np.zeros(n, dtype=np.int64)
-    for k in range(3):
-        np.add.at(v, F[:, k], 1)
-    return v
+    return np.bincount(np.asarray(F, np.int64).ravel(), minlength=n)
 
 
 def star_normal(V, F, v, rows):
@@ -160,9 +157,7 @@ def collapse_edge(F, keep, drop, em=None, min_val=3):
     F2[F2 == drop] = keep
     degen = (F2[:, 0] == F2[:, 1]) | (F2[:, 1] == F2[:, 2]) | (F2[:, 0] == F2[:, 2])
     F2 = F2[~degen]
-    srt = np.sort(F2, axis=1)
-    _, cnt = np.unique(srt, axis=0, return_counts=True)
-    if (cnt > 1).any():
+    if mi.has_duplicate_face(F2):
         return None
     return F2
 
@@ -205,9 +200,7 @@ def flip_edge(F, em, i, j, V=None):
     F2 = F.copy()
     F2[rows[0]] = new[0]
     F2[rows[1]] = new[1]
-    srt = np.sort(F2, axis=1)
-    _, cnt = np.unique(srt, axis=0, return_counts=True)
-    if (cnt > 1).any():
+    if mi.has_duplicate_face(F2):
         return None
     return F2
 
@@ -713,18 +706,8 @@ def respace(states, F, free, ell_v, p, pass_index, recent, budget,
     # The dihedral is therefore a hard precondition, not a tie-breaker.
     dih_abs = np.zeros(len(F), float)
     try:
-        from head_rgbd.neck_bridge import dihedral_deg
-        _e, _a = dihedral_deg(slist[0]["V"], F)
-        _idx = np.full(len(F), 0.0)
-        # per-edge angle -> per-face maximum over its three edges
-        _emap = {}
-        for kk in range(len(_e)):
-            _emap[(int(_e[kk, 0]), int(_e[kk, 1]))] = abs(float(_a[kk]))
-        for r in range(len(F)):
-            tri = F[r].tolist()
-            dih_abs[r] = max(_emap.get((min(tri[s], tri[(s + 1) % 3]),
-                                        max(tri[s], tri[(s + 1) % 3])), 0.0)
-                             for s in range(3))
+        from head_rgbd.neck_bridge import face_max_dihedral_deg
+        dih_abs = face_max_dihedral_deg(slist[0]["V"], F)
     except Exception:
         dih_abs = np.zeros(len(F), float)
     fold = dih_abs > float(p.get("flip_max_dihedral_deg", 45.0))

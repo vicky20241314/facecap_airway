@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import hashlib
 import json
 import sys
 import time
@@ -293,10 +294,36 @@ def _input_radial(st):
     return nfit.frame_at(P, st["ax"], st["curve"], st["h_chin"])[4]
 
 
+class _Marks:
+    """Record-only section timer: each call closes the previous section."""
+
+    def __init__(self):
+        self.t = time.perf_counter()
+        self.out = {}
+
+    def __call__(self, name):
+        now = time.perf_counter()
+        self.out[name] = round(now - self.t, 6)
+        self.t = now
+
+
+def _mesh_hash(*arrays):
+    h = hashlib.sha256()
+    for a in arrays:
+        a = np.ascontiguousarray(a)
+        h.update(str(a.shape).encode())
+        h.update(str(a.dtype).encode())
+        h.update(a.tobytes())
+    return h.hexdigest()[:16]
+
+
 def solve_state(st, F, p, h_mat, hc_c, part, ell_reg, mu_t, max_t,
-                field=None, anchor_mu=None, distance_ramp=None):
+                field=None, anchor_mu=None, distance_ramp=None,
+                ledger=None, label=""):
+    t_wall = time.perf_counter()
     m = bnd.state_masks(st, F, p, h_mat, hc_c, part,
                         distance_ramp=distance_ramp)
+    masks_s = time.perf_counter() - t_wall
     st["masks"] = m
     st["field_used"] = st["field"] if field is None else field
     fixed = m["fixed"]
@@ -316,6 +343,15 @@ def solve_state(st, F, p, h_mat, hc_c, part, ell_reg, mu_t, max_t,
                            mu_t=mu_t, mu_anchor=anchor_mu,
                            max_d_mm=p["max_d_mm"], max_t_mm=max_t,
                            max_iter=p["fit_max_iter"])
+    if ledger is not None:
+        rec = dict(out.get("profile") or {})
+        rec.update({"label": label, "state": st.get("tag"),
+                    "state_masks_s": round(masks_s, 6),
+                    "wall_s": round(time.perf_counter() - t_wall, 6),
+                    "energy": out["energy"], "n_iter": out["n_iter"],
+                    "stop_reason": out["stop_reason"],
+                    "vertices": int(len(out["V_mm"])), "faces": int(len(F))})
+        ledger.append(rec)
     st["V"] = out["V_mm"] / 1000.0
     st["solve"] = out
     return out
@@ -464,6 +500,13 @@ def main(argv=None):
     hc_c, hc_o = st["closed"]["h_chin"], st["open"]["h_chin"]
     F0 = F.copy()
     n0 = len(st["closed"]["V"])
+    # A0 time account: every solve of the run, not just the delivered one
+    solve_ledger: list[dict] = []
+    input_hash = {"vertices_closed": _mesh_hash(st["closed"]["V_input_ext"]),
+                  "vertices_open": _mesh_hash(st["open"]["V_input_ext"]),
+                  "faces": _mesh_hash(F0),
+                  "n_vertices": int(n0), "n_faces": int(len(F0))}
+    t_pre = time.perf_counter()
     log(f"  h_chin closed {hc_c:.2f} / open {hc_o:.2f} mm")
 
     # ---- 2. shared neutral material coordinate -------------------------
@@ -620,10 +663,12 @@ def main(argv=None):
                             st["closed"]["curve"], hc_c, h_mat, p)
 
     # ---- 7. solve both states on the untouched original topology --------
+    setup_s = time.perf_counter() - t_pre
     sol = {}
     for key in ("closed", "open"):
         sol[key] = solve_state(st[key], F, p, h_mat, hc_c, part, ell_reg,
-                               mu_t, max_t, distance_ramp=w_A)
+                               mu_t, max_t, distance_ramp=w_A,
+                               ledger=solve_ledger, label="initial")
         o = sol[key]
         log(f"  [{key}] unified: {o['n_free']} free / {o['n_fixed']} fixed | "
             f"{o['n_iter']} iters ({o['stop_reason']}) | max |d| "
@@ -653,7 +698,8 @@ def main(argv=None):
             st["open"]["V"] = st["open"]["V_input"].copy()
             fld = bnd.AdaptedField(st["open"]["field"], st["open"]["bg"], shift, gain)
             solve_state(st["open"], F, p, h_mat, hc_c, part, ell_reg, mu_t,
-                        max_t, field=fld, distance_ramp=w_A)
+                        max_t, field=fld, distance_ramp=w_A,
+                        ledger=solve_ledger, label=f"adapt{shift:+.1f}")
             m = nbr.connection_metrics(st["open"]["V_input_ext"], st["open"]["V"], F,
                                        part, _total_d(st["open"]), e_r_in["open"])
         sharp_ok = (m["dihedral_out_B_p95_deg"]
@@ -736,6 +782,7 @@ def main(argv=None):
         return rows
 
     for k in range(p["remesh_passes"]):
+        mk = _Marks()
         # A pass is a proposal: if the delivered crease gets worse, the whole
         # pass is rolled back.  This is what keeps a merge/flip/relax from
         # trading density for a fold that the next solve then amplifies.
@@ -753,16 +800,19 @@ def main(argv=None):
                           for key in ("closed", "open")},
                 "field_used": {key: st[key].get("field_used")
                                for key in ("closed", "open")}}
+        mk("snapshot")
         pre_stats = _crease_stats(st, F)
         pre_pos = max(r["max_pos"] for r in pre_stats)
         pre_gt10 = sum(r["pos_gt10"] for r in pre_stats)
         pre_gt20 = sum(r["pos_gt20"] for r in pre_stats)
+        mk("crease_pre")
         m_c = bnd.state_masks(st["closed"], F, p, h_mat, hc_c, part)
         m_o = bnd.state_masks(st["open"], F, p, h_mat, hc_c, part)
         free = (np.asarray(part["B"], bool) | np.asarray(part["C"], bool)) & \
                (~m_c["fixed"]) & (~m_o["fixed"])
         alive = np.zeros(len(st["closed"]["V"]), bool)
         alive[np.unique(F)] = True
+        mk("masks_free")
         ell_k, zone_k, _ = nd.ell_field(st["closed"]["V"], F, st["closed"]["ax"],
                                         st["closed"]["curve"], hc_c, scales, p,
                                         t_material=h_mat, fixed_labels=part["A"])
@@ -785,6 +835,7 @@ def main(argv=None):
         room = {"split": int(sum(room_s.values())),
                 "collapse": int(sum(room_c.values())),
                 "split_by_zone": room_s, "collapse_by_zone": room_c}
+        mk("ell_field_room")
         E, nrm, _per = nr._norm_lengths({"closed": st["closed"], "open": st["open"]},
                                         F, free, ell_k)
         n_cand_split = int(((nrm > p["split_ratio"]) &
@@ -794,12 +845,14 @@ def main(argv=None):
         not_b = ~np.asarray(part["B"], bool)
         depth_b = nr.ring_depth(F, not_b, p["merge_skip_rings"] + 1)
         collapse_ok = not_b & (depth_b > p["merge_skip_rings"])
+        mk("candidates")
         F, ops, ext = nr.respace({"closed": st["closed"], "open": st["open"]}, F, free,
                                  ell_k, p, k, recent, room, zone=zone_k,
                                  collapse_ok=collapse_ok, eligible=band_k,
                                  max_new_vertices=cap_new,
                                  new_vertices_so_far=total_splits,
                                  allow_split=not args.no_split)
+        mk("respace")
         if ops["split"]:
             part, h_mat = npart.extend_partition(part, ops, F, h_mat, vlist=h_mat,
                                                  extra_scalars=("d_head", "d_neck", "score"))
@@ -829,6 +882,7 @@ def main(argv=None):
             max_t = p["max_t_bridge_mm"] + (p["max_t_body_mm"] -
                                             p["max_t_bridge_mm"]) * seam_w
             w_A = nd.srise(d_A, 0.0, seam_taper_mm)
+        mk("extend_partition")
         did_ops = bool(ops["split"] or ops["collapse"] or ops["flip"])
         if did_ops:
             # one solve from the capture baseline on the new topology.  Solving
@@ -842,10 +896,12 @@ def main(argv=None):
                        free_new & np.asarray(part["C"], bool) & band_k, p,
                        ell_v=ext["ell_v"])
         moved = rel["max_move_mm"] >= 0.01
+        mk("relax")
         if did_ops or moved:
             for key in ("closed", "open"):
                 solve_state(st[key], F, p, h_mat, hc_c, part, ell_reg, mu_t, max_t,
-                            distance_ramp=w_A)
+                            distance_ramp=w_A, ledger=solve_ledger,
+                            label=f"remesh{k}")
         else:
             # nothing changed: restore the previous solved state and stop
             F = snap["F"].copy()
@@ -865,10 +921,12 @@ def main(argv=None):
                 st[key]["masks"] = copy.deepcopy(snap["masks"][key])
                 st[key]["field_used"] = snap["field_used"][key]
             rel = {"max_move_mm": 0.0}
+        mk("solve_two_states")
         post_stats = _crease_stats(st, F)
         post_pos = max(r["max_pos"] for r in post_stats)
         post_gt10 = sum(r["pos_gt10"] for r in post_stats)
         post_gt20 = sum(r["pos_gt20"] for r in post_stats)
+        mk("crease_post")
         rec = {"pass": k, "free": int(free.sum()), "room_split": int(room["split"]),
                "room_by_zone": room_s, "cap_by_zone": cap_zone,
                "candidate_split": n_cand_split, "candidate_collapse": n_cand_collapse,
@@ -905,6 +963,8 @@ def main(argv=None):
                 st[key]["solve"] = copy.deepcopy(snap["solve"][key])
                 st[key]["masks"] = copy.deepcopy(snap["masks"][key])
                 st[key]["field_used"] = snap["field_used"][key]
+        mk("rollback")
+        rec["timing"] = dict(mk.out)
         journal["passes"].append(rec)
         log(f"  remesh {k}: free {rec['free']} / room +{rec['room_split']} "
             f"{ {zone_names[z]: room_s[z] for z in zone_names} } | cand "
@@ -926,6 +986,7 @@ def main(argv=None):
         if not (rec["split"] or rec["collapse"] or rec["flip"]):
             break
     journal["split_new_total"] = int(total_splits)
+    t_accept = time.perf_counter()
 
     # ---- 10. acceptance data (the mesh is already solved) --------------
     finals = {key: st[key]["solve"] for key in ("closed", "open")}
@@ -1061,6 +1122,20 @@ def main(argv=None):
                 "note": "the previous implementation intersected the seeds with "
                         "C first and returned 0; this is the non-empty ring the "
                         "unified solve uses for the prior blend",
+            },
+            "timing": {
+                "input_hash": input_hash,
+                "setup_s": round(setup_s, 6),
+                "n_solves": len(solve_ledger),
+                "solve_total_s": round(sum(r["wall_s"] for r in solve_ledger), 6),
+                "solve_ledger": solve_ledger,
+                "remesh_pass_s": round(sum(sum(q["timing"].values())
+                                           for q in journal["passes"]), 6),
+                "acceptance_export_s": round(time.perf_counter() - t_accept, 6),
+                "note": ("record-only A0 account; solve_ledger covers EVERY solve "
+                         "of the run (initial + adapt + each remesh pass, both "
+                         "states), not just the delivered one. setup_s is "
+                         "material/partition/density/target-field construction."),
             },
             "seconds": time.time() - t_start}
     json.dump(meta, open(out / "build_direct.json", "w", encoding="utf-8"), indent=1,

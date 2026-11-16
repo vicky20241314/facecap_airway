@@ -106,11 +106,22 @@ def _dumpable(o):
 # signed radial field of a mesh
 # ---------------------------------------------------------------------------
 
-def section_segments(V: np.ndarray, F: np.ndarray, ax: dict, h0: float) -> np.ndarray:
+def section_triangles(V: np.ndarray, F: np.ndarray, ax: dict) -> np.ndarray:
+    """Mesh triangles in the (lateral, anterior, axis) frame, in mm.
+
+    Independent of the section height, so a caller sweeping many levels builds
+    it once instead of re-transforming every face per level.
+    """
+    centre = ax["centre_mm"]
+    e1, e2, axis = ax["lateral"], ax["anterior"], ax["axis"]
+    return (V[F] * 1000.0 - centre) @ np.column_stack([e1, e2, axis])
+
+
+def section_segments(V: np.ndarray, F: np.ndarray, ax: dict, h0: float,
+                     tri: np.ndarray | None = None) -> np.ndarray:
     """Plane h=h0 section of the mesh as (n,2,2) segments in (a,b) mm."""
-    centre, axis = ax["centre_mm"], ax["axis"]
-    e1, e2 = ax["lateral"], ax["anterior"]
-    tri = (V[F] * 1000.0 - centre) @ np.column_stack([e1, e2, axis])
+    if tri is None:
+        tri = section_triangles(V, F, ax)
     s = tri[:, :, 2] - h0
     lo, hi = s.min(axis=1), s.max(axis=1)
     ids = np.flatnonzero((lo <= 0) & (hi >= 0))
@@ -203,9 +214,10 @@ def radial_field(V, F, ax, h_chin, curve, n_theta=N_THETA, h_lo=0.02, h_hi=1.06)
     hs_ = np.arange(h_lo, h_hi + 1e-9, H_STEP / h_chin) * h_chin
     th = np.linspace(-np.pi, np.pi, n_theta, endpoint=False)
     R = np.full((len(hs_), n_theta), np.nan)
+    tri = section_triangles(V, F, ax)
     for i, h0 in enumerate(hs_):
         ca, cb = curve(float(h0))
-        segs = section_segments(V, F, ax, float(h0))
+        segs = section_segments(V, F, ax, float(h0), tri=tri)
         if len(segs) == 0:
             continue
         R[i] = ray_radius(segs, th, (float(ca), float(cb)))

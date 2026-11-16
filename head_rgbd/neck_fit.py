@@ -58,6 +58,8 @@ quadratures, each of which integrates to the area on its own).
 """
 from __future__ import annotations
 
+import time
+
 import numpy as np
 from scipy import sparse
 from scipy.sparse.linalg import spsolve
@@ -535,46 +537,50 @@ def build_samples_3d(V_mm, F, D, ax, curve, h_chin, field, fixed, wfun,
     V_mm = np.asarray(V_mm, float)
     D = np.asarray(D, float)
     F = np.asarray(F, np.int64)
-    N = len(V_mm)
     if A_v is None:
         _, _, A_v = cotan_operators(V_mm, F)
     wfun = _no_weight if wfun is None else wfun
+    fixed = np.asarray(fixed, bool)
     Pv = V_mm + D
-    hv, thv, rv, _, _, _ = frame_at(Pv, ax, curve, h_chin)
-    Rv, dRh_v, dRt_v = field_grad(field, hv, thv)
-    Rv = np.where(np.isfinite(Rv), Rv, rv)
-
-    par_v = np.arange(N)[:, None].repeat(3, axis=1)
-    lam_v = np.broadcast_to(np.array([1.0, 0.0, 0.0]), (N, 3))
-    w_v = np.asarray(wfun(Pv, hv, thv, rv, lam_v, par_v), float)
-    w_v = np.where(np.asarray(fixed, bool), 0.0, np.maximum(w_v, 0.0))
     av = 0.5 * A_v
 
     pts, res, wts, par, lam, jh, jt, kind = [], [], [], [], [], [], [], []
-    keepv = w_v > 1e-6
-    if keepv.any():
-        pts.append(Pv[keepv]); res.append((Rv - rv)[keepv])
-        wts.append(av[keepv] * w_v[keepv])
-        par.append(par_v[keepv]); lam.append(lam_v[keepv])
-        jh.append(dRh_v[keepv]); jt.append(dRt_v[keepv])
-        kind.append(np.zeros(int(keepv.sum()), np.int8))
+    # A fixed vertex has its weight forced to zero, so it can never survive
+    # ``keepv``.  Evaluate the frame, the field and the weight only on the free
+    # vertices instead of on the whole mesh and throwing 96% of it away.
+    vidx = np.flatnonzero(~fixed)
+    if len(vidx):
+        Pvf = Pv[vidx]
+        hv, thv, rv, _, _, _ = frame_at(Pvf, ax, curve, h_chin)
+        Rv, dRh_v, dRt_v = field_grad(field, hv, thv)
+        Rv = np.where(np.isfinite(Rv), Rv, rv)
+        par_v = vidx[:, None].repeat(3, axis=1)
+        lam_v = np.broadcast_to(np.array([1.0, 0.0, 0.0]), (len(vidx), 3))
+        w_v = np.maximum(np.asarray(wfun(Pvf, hv, thv, rv, lam_v, par_v), float), 0.0)
+        keepv = w_v > 1e-6
+        if keepv.any():
+            pts.append(Pvf[keepv]); res.append((Rv - rv)[keepv])
+            wts.append(av[vidx][keepv] * w_v[keepv])
+            par.append(par_v[keepv]); lam.append(lam_v[keepv])
+            jh.append(dRh_v[keepv]); jt.append(dRt_v[keepv])
+            kind.append(np.zeros(int(keepv.sum()), np.int8))
 
-    fixed = np.asarray(fixed, bool)
-    tri = Pv[F]
-    tri0 = V_mm[F]
-    cr = np.cross(tri0[:, 1] - tri0[:, 0], tri0[:, 2] - tri0[:, 0])
-    Af = 0.5 * np.linalg.norm(cr, axis=1)
-    free_face = ~fixed[F].all(axis=1)
-    fid = np.flatnonzero(free_face)
+    # a face with every corner fixed cannot move at all: it has no unknowns.
+    # Select it before building any geometry, and keep every face that has at
+    # least one free corner -- its fixed corners still move the sample point.
+    fid = np.flatnonzero(~fixed[F].all(axis=1))
     if len(fid):
-        tri_f = tri[fid]
-        Af_f = Af[fid]
+        Ff = F[fid]
+        tri = Pv[Ff]
+        tri0 = V_mm[Ff]
+        cr = np.cross(tri0[:, 1] - tri0[:, 0], tri0[:, 2] - tri0[:, 0])
+        Af_f = 0.5 * np.linalg.norm(cr, axis=1)
         for k in range(4):
-            Pk = np.einsum("j,njc->nc", BARY[k], tri_f)
+            Pk = np.einsum("j,njc->nc", BARY[k], tri)
             hk, tk, rk, _, _, _ = frame_at(Pk, ax, curve, h_chin)
             Rk, dRhk, dRtk = field_grad(field, hk, tk)
             Rk = np.where(np.isfinite(Rk), Rk, rk)
-            park = F[fid]
+            park = Ff
             lamk = np.broadcast_to(BARY[k], (len(fid), 3))
             wk = np.asarray(wfun(Pk, hk, tk, rk, lamk, park), float)
             wk = np.maximum(wk, 0.0)
@@ -626,14 +632,25 @@ def jacobian_rows_3d(smp, ax, curve, h_chin, fixed):
     return np.where(bad, 0.0, J)
 
 
-def assemble_3d(N, smp, J):
-    """Sparse weighted design matrix for the 3-D displacement."""
+def assemble_3d(N, smp, J, colmap=None, ncols=None):
+    """Sparse weighted design matrix for the 3-D displacement.
+
+    ``colmap`` re-indexes the ``3*N`` vertex columns into a reduced space and
+    maps dropped columns to -1.  Those entries are exactly zero (the Jacobian
+    zeroes every fixed parent), so removing them leaves the kept columns
+    unchanged, including the order in which duplicates are summed.
+    """
     n = J.shape[0]
-    rows = np.repeat(np.arange(n), 9)
-    cols = (smp["par"][:, :, None] * 3 +
-            np.arange(3)[None, None, :]).ravel()
-    vals = (np.sqrt(smp["w"])[:, None, None] * J).ravel()
-    return sparse.coo_matrix((vals, (rows, cols)), shape=(n, 3 * N)).tocsr()
+    rows = np.broadcast_to(np.arange(n)[:, None, None], (n, 3, 3))
+    cols = smp["par"][:, :, None] * 3 + np.arange(3)[None, None, :]
+    vals = np.sqrt(smp["w"])[:, None, None] * J
+    if colmap is None:
+        return sparse.coo_matrix((vals.ravel(), (rows.ravel(), cols.ravel())),
+                                 shape=(n, 3 * N)).tocsr()
+    cols = colmap[cols]
+    keep = cols >= 0
+    return sparse.coo_matrix((vals[keep], (rows[keep], cols[keep])),
+                             shape=(n, ncols)).tocsr()
 
 
 def _projection_rows(V_mm, D, A_v, mu, fixed, ax, curve, h_chin,
@@ -720,11 +737,13 @@ def fit_unified(V, F, ax, curve, h_chin, field, ell_reg, fixed, wfun, p,
     free = ~fixed
     e_r0 = frame_at(V_mm, ax, curve, h_chin)[4]
 
+    t_op = time.perf_counter()
     L, M, A_v = cotan_operators(V_mm, F)
     Rb = bending_operator(L, A_v, ell_reg)
     I3 = sparse.eye(3, format="csr")
     Rb3 = sparse.kron(Rb, I3, format="csr")
     mu_small = float(p.get("mu_small", 1e-3))
+    t_setup = time.perf_counter()
 
     D = np.zeros((N, 3))
     smp = build_samples_3d(V_mm, F, D, ax, curve, h_chin, field, fixed, wfun,
@@ -739,29 +758,47 @@ def fit_unified(V, F, ax, curve, h_chin, field, ell_reg, fixed, wfun, p,
     converged, reason = False, "max_iter"
     g_ref = None
 
+    free3 = np.repeat(free, 3)
+    fidx = np.flatnonzero(free3)
+    nf3 = len(fidx)
+    colmap = np.full(3 * N, -1, np.int64)
+    colmap[fidx] = np.arange(nf3)
+    # Rb3, T and Aanch are built once for this call and never rebuilt inside the
+    # loop, so their Gram matrix is static: assemble it once, not per iteration.
+    # Only the data Jacobian changes with D.
+    K = (Rb3.T @ Rb3 + T.T @ T + Aanch.T @ Aanch +
+         sparse.diags(np.repeat(2.0 * mu_small * A_v, 3))).tocsc()
+    K_FF = K[fidx][:, fidx].tocsc()
+    H_static = (K_FF + sparse.diags(np.full(nf3, 1e-10))).tocsc()
+    # record-only time account (A0): never read by the solve
+    prof = {"operators_s": t_setup - t_op,
+            "setup_s": time.perf_counter() - t_setup,
+            "jac_assemble_s": 0.0, "system_s": 0.0, "solve_s": 0.0,
+            "line_search_s": 0.0, "line_search_trials": 0,
+            "n_vertices": N, "n_free": int(free.sum()),
+            "reduced_unknowns": nf3, "full_unknowns": 3 * N,
+            "regularizer_nnz": int(K.nnz), "regularizer_free_nnz": int(K_FF.nnz)}
+
     for it in range(int(max_iter)):
         if not len(smp["w"]):
             reason = "no_samples"
             break
+        t0 = time.perf_counter()
         J = jacobian_rows_3d(smp, ax, curve, h_chin, fixed)
-        Js = assemble_3d(N, smp, J)
-        vec = D.ravel()
-        H = (Js.T @ Js + Rb3.T @ Rb3 + T.T @ T + Aanch.T @ Aanch).tocsc()
-        # the small isotropic prior is diagonal; its Hessian must be present or
-        # the Gauss-Newton step ignores half of the term it is minimising
-        H = H + sparse.diags(np.repeat(2.0 * mu_small * A_v, 3))
+        Js = assemble_3d(N, smp, J, colmap=colmap, ncols=nf3)
+        prof["jac_assemble_s"] += time.perf_counter() - t0
+        # D is exactly zero on the fixed set and every fixed increment is zero,
+        # so the masked full system reduces to H_FF delta_F = -g_F with no
+        # H_FC delta_C term.  The bending rows of fixed vertices are kept: they
+        # couple to free columns and carry the boundary of the protected set.
+        t0 = time.perf_counter()
+        vec_F = D[free].ravel()
+        H = (Js.T @ Js + H_static).tocsc()
         g = (np.asarray(Js.T @ (np.sqrt(smp["w"]) * smp["res"])).ravel() +
-             np.asarray(Rb3.T @ (Rb3 @ vec)).ravel() +
-             np.asarray(T.T @ (T @ vec)).ravel() +
-             np.asarray(Aanch.T @ (Aanch @ vec)).ravel() +
-             2.0 * mu_small * (A_v[:, None] * D).ravel())
-        free3 = np.repeat(free, 3)
-        H = (sparse.diags(free3.astype(float)) @ H @
-             sparse.diags(free3.astype(float)) +
-             sparse.diags((~free3).astype(float)) +
-             sparse.diags(free3 * 1e-10))
-        g = np.where(free3, g, 0.0)
-        gnorm = float(np.abs(g[free3]).max()) if free3.any() else 0.0
+             K_FF @ vec_F)
+        prof["system_s"] += time.perf_counter() - t0
+        prof["hessian_nnz"] = int(H.nnz)
+        gnorm = float(np.abs(g).max()) if nf3 else 0.0
         if g_ref is None:
             g_ref = max(gnorm, 1e-30)
         if gnorm <= 1e-9 * g_ref:
@@ -777,13 +814,16 @@ def fit_unified(V, F, ax, curve, h_chin, field, ell_reg, fixed, wfun, p,
             if log is not None:
                 log.append(hist[-1])
             break
-        delta = -np.asarray(spsolve(H.tocsc(), g), float)
-        delta = np.where(np.isfinite(delta), delta, 0.0).reshape(N, 3)
-        delta = np.where(free[:, None], delta, 0.0)
-        if float(g @ delta.ravel()) >= 0.0:
+        t0 = time.perf_counter()
+        d_F = -np.asarray(spsolve(H, g), float)
+        prof["solve_s"] += time.perf_counter() - t0
+        d_F = np.where(np.isfinite(d_F), d_F, 0.0)
+        if float(g @ d_F) >= 0.0:
             hd = H.diagonal()
             hd = np.where(hd > 0, hd, 1.0)
-            delta = (-g / hd).reshape(N, 3)
+            d_F = -g / hd
+        delta = np.zeros((N, 3))
+        delta[free] = d_F.reshape(-1, 3)
         if np.max(np.abs(delta)) < tol_step_mm:
             converged, reason = True, "step_below_tolerance"
             hist.append({"iter": it, "samples": int(len(smp["w"])),
@@ -801,7 +841,10 @@ def fit_unified(V, F, ax, curve, h_chin, field, ell_reg, fixed, wfun, p,
 
         alpha, accepted = 1.0, False
         D_new, smp_new, parts_new, e_new = D, smp, parts, e_prev
+        t0 = time.perf_counter()
+        trials = 0
         for _ in range(24):
+            trials += 1
             D_try = D + alpha * delta
             if not _bounds_ok(D_try, e_r0, free, max_d, max_t_mm):
                 alpha *= 0.5
@@ -814,6 +857,8 @@ def fit_unified(V, F, ax, curve, h_chin, field, ell_reg, fixed, wfun, p,
                 D_new, smp_new, parts_new, e_new = D_try, smp_try, p_try, e_try
                 break
             alpha *= 0.5
+        prof["line_search_s"] += time.perf_counter() - t0
+        prof["line_search_trials"] += trials
 
         dnorm = float(np.max(np.abs(D_new - D)))
         rel = abs(e_prev - e_new) / max(e_prev, 1e-12)
@@ -840,12 +885,17 @@ def fit_unified(V, F, ax, curve, h_chin, field, ell_reg, fixed, wfun, p,
             break
 
     P_end = V_mm + D
+    t0 = time.perf_counter()
     smp_end = build_samples_3d(V_mm, F, D, ax, curve, h_chin, field, fixed, wfun,
                                A_v=A_v)
     kv = smp_end["kind"] == 0
     kf = smp_end["kind"] == 1
     sv = _wstats(smp_end["res"][kv], smp_end["w"][kv])
     sf = _wstats(smp_end["res"][kf], smp_end["w"][kf])
+    prof["final_residual_s"] = time.perf_counter() - t0
+    prof["total_s"] = time.perf_counter() - t_op
+    prof["n_iter"] = len(hist)
+    prof["stop_reason"] = reason
     rad = np.einsum("nk,nk->n", D, e_r0)
     tan = D - rad[:, None] * e_r0
     return {"V_mm": P_end, "d_mm": D, "s_mm": rad, "e_r": e_r0,
@@ -854,6 +904,7 @@ def fit_unified(V, F, ax, curve, h_chin, field, ell_reg, fixed, wfun, p,
             "energy_parts": parts_new if hist else parts,
             "data_samples": int(len(smp_end["w"])),
             "bend_rows": int(Rb3.shape[0]),
+            "profile": prof,
             "max_d_mm": float(np.linalg.norm(D, axis=1).max()) if N else 0.0,
             "max_d_rad_mm": float(np.abs(rad).max()) if N else 0.0,
             "max_d_tan_mm": float(np.linalg.norm(tan, axis=1).max()) if N else 0.0,

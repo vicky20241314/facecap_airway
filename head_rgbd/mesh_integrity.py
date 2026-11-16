@@ -25,14 +25,53 @@ def load_obj(path):
     return np.asarray(vertices, dtype=float), np.asarray(faces, dtype=np.int64)
 
 
+def normals(v, f):
+    """Area-weighted vertex normals (pure numpy)."""
+    tri = v[f]; n = np.cross(tri[:, 1] - tri[:, 0], tri[:, 2] - tri[:, 0])
+    out = np.zeros_like(v)
+    for j in range(3): np.add.at(out, f[:, j], n)
+    return out / np.maximum(np.linalg.norm(out, axis=1, keepdims=True), 1e-12)
+
+
+def _sorted_key_base(n):
+    """Largest vertex count whose sorted triples still fit in one int64 key."""
+    return n <= 2_097_151
+
+
 def edge_records(faces):
     faces = np.asarray(faces, dtype=np.int64)
     directed = np.vstack((faces[:, [0, 1]], faces[:, [1, 2]], faces[:, [2, 0]]))
-    edges, inverse, counts = np.unique(np.sort(directed, axis=1), axis=0,
-                                      return_inverse=True, return_counts=True)
+    lo = np.minimum(directed[:, 0], directed[:, 1])
+    hi = np.maximum(directed[:, 0], directed[:, 1])
+    n = int(faces.max()) + 1 if faces.size else 1
+    if _sorted_key_base(n):
+        # lo*n+hi orders exactly like the lexicographic (lo, hi) pair, so the
+        # unique rows, their order, inverse and counts are unchanged; a 1-D
+        # integer sort replaces the void-dtype row sort.
+        keys, inverse, counts = np.unique(lo * n + hi, return_inverse=True,
+                                          return_counts=True)
+        edges = np.column_stack((keys // n, keys % n))
+    else:
+        edges, inverse, counts = np.unique(np.sort(directed, axis=1), axis=0,
+                                           return_inverse=True, return_counts=True)
     signs = np.where(directed[:, 0] < directed[:, 1], 1, -1)
     balance = np.bincount(inverse, weights=signs, minlength=len(edges))
     return edges, inverse, counts, signs, balance
+
+
+def has_duplicate_face(faces):
+    """True when two rows of ``faces`` hold the same vertex set."""
+    faces = np.asarray(faces, dtype=np.int64)
+    if not len(faces):
+        return False
+    srt = np.sort(faces, axis=1)
+    n = int(srt.max()) + 1
+    if not _sorted_key_base(n):
+        _, cnt = np.unique(srt, axis=0, return_counts=True)
+        return bool((cnt > 1).any())
+    key = (srt[:, 0] * n + srt[:, 1]) * n + srt[:, 2]
+    key.sort()
+    return bool(np.any(key[1:] == key[:-1]))
 
 
 def topology_report(vertices, faces):

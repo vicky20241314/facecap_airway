@@ -322,8 +322,8 @@ def face_normals(V_m, F):
     return n / np.maximum(np.linalg.norm(n, axis=1), 1e-12)[:, None]
 
 
-def dihedral_deg(V_m, F):
-    """Signed dihedral angle (deg) across every interior edge."""
+def _dihedral_core(V_m, F):
+    """Edge table, directed-edge inverse, interior-edge ids and signed angles."""
     E, inv, counts = mi.edge_records(F)[:3]
     n = face_normals(V_m, F)
     two = np.flatnonzero(counts == 2)
@@ -338,7 +338,26 @@ def dihedral_deg(V_m, F):
     ang = np.degrees(np.arccos(np.clip(c, -1.0, 1.0)))
     s = np.einsum("ij,ij->i", np.cross(n[f0], n[f1]),
                   np.asarray(V_m, float)[E[two, 1]] - np.asarray(V_m, float)[E[two, 0]])
-    return E[two], ang * np.sign(s)
+    return E, inv, two, ang * np.sign(s)
+
+
+def dihedral_deg(V_m, F):
+    """Signed dihedral angle (deg) across every interior edge."""
+    E, _inv, two, a = _dihedral_core(V_m, F)
+    return E[two], a
+
+
+def face_max_dihedral_deg(V_m, F):
+    """Per-face maximum |dihedral| over its three edges.
+
+    A boundary or non-manifold edge has no dihedral and contributes 0, which is
+    what the per-face fold test used to read out of an edge->angle dict.
+    """
+    E, inv, two, a = _dihedral_core(V_m, F)
+    per_edge = np.zeros(len(E))
+    per_edge[two] = np.abs(a)
+    # edge_records lists the directed edges position-major: k*len(F) + row
+    return per_edge[inv].reshape(3, len(F)).max(axis=0)
 
 
 def connection_metrics(V_in, V_out, F, part, d_mm, e_r):
